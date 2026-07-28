@@ -1,0 +1,138 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "/app/agents/coder/.openclaw/workspace",
+      "model": {
+        "primary": "litellm/${LITELLM_MODEL}"
+      },
+      "models": {
+        "litellm/${LITELLM_MODEL}": {}
+      }
+    },
+    "list": [
+      {
+        "id": "main"
+      },
+      {
+        "id": "planner",
+        "name": "Planner",
+        "workspace": "/app/agents/coder/.openclaw/workspace/planner",
+        "agentDir": "/app/agents/coder/.openclaw/agents/planner/agent"
+      },
+      {
+        "id": "executor",
+        "name": "executor",
+        "workspace": "/app/agents/coder/.openclaw/workspace/executor",
+        "agentDir": "/app/agents/coder/.openclaw/agents/executor/agent"
+      },
+      {
+        "id": "reviewer",
+        "name": "reviewer",
+        "workspace": "/app/agents/coder/.openclaw/workspace/reviewer",
+        "agentDir": "/app/agents/coder/.openclaw/agents/reviewer/agent"
+      }
+    ]
+  },
+  "gateway": {
+    "mode": "local",
+    "auth": {
+      "mode": "token",
+      "token": "f521b187139fc8371f8bcc88d57c187af1d22cd2cba99d4e"
+    },
+    "port": 18789,
+    "bind": "loopback",
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    },
+    "controlUi": {
+      "allowInsecureAuth": true
+    },
+    "nodes": {
+      "denyCommands": [
+        "camera.snap",
+        "camera.clip",
+        "screen.record",
+        "contacts.add",
+        "calendar.add",
+        "reminders.add",
+        "sms.send",
+        "sms.search"
+      ]
+    }
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "tools": {
+    "profile": "full",
+    "web": {
+      "search": {
+        "enabled": false
+      }
+    }    
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "litellm": {
+        "baseUrl": "${LITELLM_API_URL}",
+        "api": "openai-completions",
+        "apiKey": "${LITELLM_API_KEY}",
+        "timeoutSeconds": 600,
+        "models": [
+          {
+            "id": "${LITELLM_MODEL}",
+            "name": "${LITELLM_MODEL}",
+            "contextWindow": 128000,
+            "maxTokens": 32768,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "reasoning": false
+          }
+        ]
+      }
+    }
+  },
+  "plugins": {},
+  "channels": {},
+  "hooks": {
+    "internal": {
+      "enabled": true,
+      "entries": {
+        "session-memory": {
+          "enabled": true
+        },
+        "compaction-notifier": {
+          "enabled": true
+        },
+        "command-logger": {
+          "enabled": true
+        },
+        "bootstrap-extra-files": {
+          "enabled": true
+        },
+        "boot-md": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "wizard": {
+    "lastRunAt": "2026-06-18T23:57:04.579Z",
+    "lastRunVersion": "2026.6.8",
+    "lastRunCommand": "onboard",
+    "lastRunMode": "local"
+  },
+  "meta": {
+    "lastTouchedVersion": "2026.6.11",
+    "lastTouchedAt": "2026-07-13T12:48:08.808Z"
+  }
+}

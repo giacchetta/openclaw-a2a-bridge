@@ -1,0 +1,49 @@
+services:
+  apicurio:
+    image: quay.io/apicurio/apicurio-registry-mem:2.4.14.Final
+    ports:
+      - "8080:8080"
+    networks:
+      - openclaw-net
+
+  researcher:
+    build: .
+    environment:
+      - AGENT_ROLE=Researcher
+      - AGENT_PORT=3000
+      - REGISTRY_URL=http://apicurio:8080/apis/registry/v2
+      - HOST_IP=researcher
+      - OPENCLAW_STATE_DIR=/app/agents/researcher/.openclaw
+      # Token auth for the in-container OpenClaw Gateway WS (matches gateway.auth.token
+      # in agents/researcher/.openclaw/openclaw.json). The bridge uses this to call
+      # agent -> agent.wait -> sessions.history instead of the fire-and-forget CLI.
+      - GATEWAY_AUTH_TOKEN=f521b187139fc8371f8bcc88d57c187af1d22cd2cba99d4e
+    volumes:
+      - .:/app
+    depends_on:
+      - apicurio
+    networks:
+      - openclaw-net
+
+  coder:
+   build: .
+   environment:
+     - AGENT_ROLE=Coder
+     - AGENT_PORT=3000
+     - REGISTRY_URL=http://apicurio:8080/apis/registry/v2
+     - HOST_IP=coder
+     - OPENCLAW_STATE_DIR=/app/agents/coder/.openclaw
+     # Token auth for the in-container OpenClaw Gateway WS (matches gateway.auth.token
+     # in agents/coder/.openclaw/openclaw.json).
+     - GATEWAY_AUTH_TOKEN=f521b187139fc8371f8bcc88d57c187af1d22cd2cba99d4e
+   volumes:
+     - .:/app
+   depends_on:
+     - apicurio
+   networks:
+     - openclaw-net
+
+networks:
+  openclaw-net:
+    driver: bridge
+
