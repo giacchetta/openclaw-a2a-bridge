@@ -11,22 +11,46 @@
     },
     "list": [
       {
-        "id": "main"
+        "id": "main",
+        "subagents": {
+          "allowAgents": ["*"]
+        },
+        "tools": {
+          "profile": "full",
+          "alsoAllow": ["sessions_spawn", "sessions_yield", "subagents"],
+          "deny": [
+            "web_fetch",
+            "apply_patch",
+            "read",
+            "write",
+            "edit",
+            "exec"
+          ]
+        }
       },
       {
         "id": "planner",
-        "name": "Planner",
+        "tools": {
+          "profile": "full"
+        },
+        "name": "planner",
         "workspace": "/app/agents/coder/.openclaw/workspace/planner",
         "agentDir": "/app/agents/coder/.openclaw/agents/planner/agent"
       },
       {
         "id": "executor",
+        "tools": {
+          "profile": "full"
+        },
         "name": "executor",
         "workspace": "/app/agents/coder/.openclaw/workspace/executor",
         "agentDir": "/app/agents/coder/.openclaw/agents/executor/agent"
       },
       {
         "id": "reviewer",
+        "tools": {
+          "profile": "full"
+        },
         "name": "reviewer",
         "workspace": "/app/agents/coder/.openclaw/workspace/reviewer",
         "agentDir": "/app/agents/coder/.openclaw/agents/reviewer/agent"

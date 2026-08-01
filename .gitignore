@@ -1,3 +1,4 @@
+.envrc
 agents/*/.openclaw/*
 !agents/*/.openclaw/workspace/
 !agents/*/.openclaw/openclaw.json
