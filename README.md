@@ -38,7 +38,7 @@ flowchart TD
     REG -. "registers" .-> RES
     REG -. "registers" .-> COD
     RES -- "A2A code delegation<br/>(reviewer → coder:3000)" --> COD
-    COD -.x "one-way only<br/>(Coder never calls back)" .-> RES
+    COD -. "one-way only<br/>(Coder never calls back)" .-> RES
 
     classDef pending stroke-dasharray: 5 5,stroke:#e0a800,color:#7a6000;
     class RES pending;
