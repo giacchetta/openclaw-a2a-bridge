@@ -1,7 +1,7 @@
 # AGENTS.md — A2A Network Architecture
 
 > **Document status:** Production-ready PoC blueprint.
-> **Last updated:** 2026-07-27
+> **Last updated:** 2026-08-01
 
 ---
 ## 📝 Companion Document: `README.md`
@@ -545,6 +545,21 @@ Every root agent contains the **exact same tri-node architecture** — three sub
 | **Quality gates** | Verifies factual claims, checks code correctness, ensures JSON compliance, strips any conversational filler. |
 | **Output** | The final, pristine deliverable — synthesized and formatted for JSON-RPC response back to the network. |
 
+> **Researcher reviewer — A2A code delegation (prompt-based, pending enforcement):**
+> The Researcher's `reviewer/IDENTITY.md` carries an **"A2A Code Delegation"** directive: when the task requires generating or modifying code, the reviewer is instructed to POST a precise code spec to the Coder agent at `http://coder:3000/a2a/tasks` (JSON-RPC) and fold the Coder's `result.output` into its synthesized deliverable, rather than writing the code itself. The delegation is **one-way** (Coder never calls back to Researcher) and **code-only** (research/synthesis stays the reviewer's job).
+>
+> ⚠️ **Status — pending enforcement (agent-platform limitation):** End-to-end testing (2026-08-01) showed this directive does **not** fire in practice. The reviewer is a capable model with `tools.profile: "full"` (exec/curl access), and its task-completion instinct overrides the prompt-level "FORBIDDEN FROM WRITING CODE" rule — it generates the code itself and Coder's bridge never receives a delegation. This is tracked as an **agent-platform limitation**, not a model limitation (other non-OpenClaw agents perform sub-agent delegation reliably). See §11 and issues #6/#7/#8 for the structural-enforcement options under evaluation.
+
+### Orchestrator Guardrails (Researcher `main`)
+
+The Researcher root agent (`main/IDENTITY.md`) carries three guardrails that fix recurring early-termination failure modes discovered during end-to-end testing. Without them, the orchestrator tended to end its turn mid-loop, capturing narration as the final answer and orphaning the reviewer.
+
+| Guardrail | Failure mode it fixes |
+|----------|----------------------|
+| **TRUNCATED-OUTPUT RULE** | Orchestrator must not retrieve, narrate, or repair truncated executor output; it forwards the resume payload straight to the reviewer. |
+| **STEP 5→6 ATOMIC** | `sessions_spawn(reviewer)` and `sessions_yield` must happen back-to-back in the same turn (fixes the reviewer being orphaned when the orchestrator ends after spawning it). |
+| **EXECUTOR ERROR / EMPTY-OUTPUT RULE** | On executor error or empty output, do not re-spawn the executor; proceed immediately to the reviewer with the blueprint plus a factual failure note. There is no "STEP 4b: retry executor" step. |
+
 ### Domain Customization
 
 The tri-node architecture is identical, but each agent's `IDENTITY.md` customizes the domain:
@@ -568,14 +583,16 @@ The tri-node architecture is identical, but each agent's `IDENTITY.md` customize
 
 ### Agent Sub-Nodes (per agent)
 
-Each agent container (`researcher`, `coder`) contains these sub-agents in its `.openclaw` state directory:
+Each agent container (`researcher`, `coder`) contains these sub-agents in its `.openclaw` state directory. Both agents now share the **same tri-node architecture and tool access** (Phase 1 brought Coder to parity with Researcher):
 
-| Sub-Agent | Node Type | Function |
-|-----------|-----------|----------|
-| `main` | Root | Receives A2A bridge payloads, delegates to sub-agents |
-| `planner` | Sub-agent | Analyzes task, produces sequential blueprint |
-| `executor` | Sub-agent | Executes planner's blueprint using system tools |
-| `reviewer` | Sub-agent | Audits output, synthesizes final deliverable |
+| Sub-Agent | Node Type | Tools | Function |
+|-----------|-----------|-------|----------|
+| `main` | Root | exec/web_fetch **denied** | Orchestrator-only router; receives A2A bridge payloads, delegates to sub-agents via `sessions_spawn` then `sessions_yield` |
+| `planner` | Sub-agent | `tools.profile: "full"` | Analyzes task, produces sequential blueprint (does not execute) |
+| `executor` | Sub-agent | `tools.profile: "full"` (no deny list) | Executes planner's blueprint using system tools (exec, curl, web_fetch, file I/O) |
+| `reviewer` | Sub-agent | `tools.profile: "full"` (no deny list) | Audits output, synthesizes final deliverable; on the Researcher, carries the (pending-enforcement) A2A code-delegation directive |
+
+> **Coder parity (Phase 1):** Coder's `main` is now an orchestrator-only router matching Researcher's pattern (exec/web_fetch denied on `main`); all Coder sub-agents have `tools.profile: "full"`. The planner `id` is lowercase (`planner`) to match the `sessions_spawn` casing requirement.
 
 ---
 
@@ -669,6 +686,8 @@ ls -la agents/coder/.openclaw/
 | **`openclaw agent` CLI is fire-and-forget** | The CLI returns `{ runId, acceptedAt }` at acceptance, NOT completion, so sub-agent responses (planner/executor/reviewer) are produced after the CLI exits | Bridge speaks the Gateway WS protocol (`connect` → `agent` → subscribe to `chat` events) instead of shelling out to the CLI; it waits for the main session's final synthesized `chat` event (arrives under a resumed runId after the spawn tree finishes). `agent.wait` is raced only for early error detection — it resolves at the first `sessions_yield`, NOT at spawn-tree completion |
 | **`sessions.history` requires `operator.admin`** | The device is approved for `operator.write` only; `sessions.history` triggers `PAIRING_REQUIRED` | The bridge reads the result from the `chat` event stream instead of calling `sessions.history` |
 | **Sub-agent id casing** | `sessions_spawn` targets sub-agents by exact `id`; a mismatched case (e.g. `Executor` vs `executor`) silently fails to resolve | All sub-agent `id` values in `openclaw.json` are lowercase and match the IDs referenced in `IDENTITY.md`/`AGENTS.md` |
+| **Prompt-only A2A delegation does not fire** | The Researcher reviewer's "A2A Code Delegation" directive (POST code spec to Coder, don't write code yourself) is overridden by the model's task-completion instinct — the reviewer writes the code itself and Coder's bridge never receives a delegation. Proven across 4 end-to-end tests (2026-08-01) with both reviewer and executor as the delegation point. | **Pending structural enforcement.** The directive is in place as the intended design; making it actually fire is tracked in issues #6 (live with the limitation), #7 (plugin/extend OpenClaw to enforce deterministically), and #8 (fork/build a new runtime with first-class sub-agent delegation). The orchestrator guardrails (TRUNCATED-OUTPUT, STEP 5→6 ATOMIC, EXECUTOR ERROR) are in place and working. |
+| **Orchestrator early-termination (mitigated, not fully solved)** | The Researcher `main` orchestrator can end its turn mid-loop, capturing narration as the final answer and orphaning the reviewer. Triggered by truncated executor output, the step 5→6 gap, or executor errors. | Three guardrails in `main/IDENTITY.md` (TRUNCATED-OUTPUT RULE, STEP 5→6 ATOMIC, EXECUTOR ERROR / EMPTY-OUTPUT RULE) fix the known trigger paths. Test 5 showed a residual truncation-triggered early-termination still possible; full reliability likely requires the same structural enforcement as the delegation issue above. |
 
 ---
 

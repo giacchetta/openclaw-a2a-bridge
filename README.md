@@ -37,8 +37,14 @@ flowchart TD
     WS -- "VirtioFS mount" --> VM
     REG -. "registers" .-> RES
     REG -. "registers" .-> COD
-    RES <--> COD
+    RES -- "A2A code delegation<br/>(reviewer → coder:3000)" --> COD
+    COD -.x "one-way only<br/>(Coder never calls back)" .-> RES
+
+    classDef pending stroke-dasharray: 5 5,stroke:#e0a800,color:#7a6000;
+    class RES pending;
 ```
+
+> ⚠️ The Researcher→Coder delegation edge is the **intended design** but is **pending enforcement** — see [Known limitations](#-known-limitations) below. The dashed style marks it as not-yet-reliable.
 
 ### What happens when you send a task
 
@@ -80,6 +86,19 @@ flowchart LR
 | 🧭 **Planner** | Break the task into a clear step-by-step blueprint | Run any tools |
 | 🛠️ **Executor** | Carry out the plan — scrape, code, fetch, write files | Judge its own output |
 | ✅ **Reviewer** | Audit for accuracy, safety, and clean JSON formatting | Re-do the work |
+
+> 🔬 **On the Researcher**, the reviewer also carries an **A2A code-delegation** directive: when a task needs code, it should hand the code work to the **Coder** agent over the network instead of writing it itself. This is the intended design but is **pending enforcement** — see [Known limitations](#-known-limitations) below.
+
+---
+
+## ⚠️ Known limitations
+
+End-to-end testing (2026-08-01) surfaced two agent-platform limitations that are **not yet resolved** and are tracked in follow-up issues:
+
+1. **Prompt-only A2A delegation does not fire.** The Researcher's reviewer is told (via its `IDENTITY.md`) to delegate code work to the Coder agent over A2A rather than writing the code itself. In practice the reviewer — a capable model with full tool access — overrides the prompt rule and writes the code directly, so the Coder agent never receives a delegation. Proven across 4 tests with both the reviewer and the executor as the delegation point. This is an **agent-platform limitation**, not a model limitation (other non-OpenClaw agents perform sub-agent delegation reliably). Tracked in issues #6, #7, and #8.
+2. **Orchestrator early-termination (mitigated, not fully solved).** The Researcher's root agent can end its turn mid-loop, capturing narration as the final answer and orphaning the reviewer. Three guardrails in `main/IDENTITY.md` (TRUNCATED-OUTPUT RULE, STEP 5→6 ATOMIC, EXECUTOR ERROR RULE) fix the known trigger paths, but a residual truncation-triggered case was still observed in test 5.
+
+The **orchestrator guardrails are in place and working**; the planner→executor→reviewer loop now completes. What's pending is the actual cross-agent delegation firing reliably. See [AGENTS.md §11](./AGENTS.md#11-known-constraints--workarounds) for the full technical detail.
 
 ---
 
