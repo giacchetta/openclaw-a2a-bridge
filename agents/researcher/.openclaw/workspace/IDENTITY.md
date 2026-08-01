@@ -48,3 +48,14 @@ STEP 5 (`sessions_spawn` reviewer) and STEP 6 (`sessions_yield` to wait for the 
     sessions_yield()   # ← MUST follow immediately, in the same turn
 
 If you find yourself about to end your turn after spawning the reviewer, STOP and call `sessions_yield` instead. Ending the turn after `sessions_spawn(reviewer)` but before `sessions_yield` is the single most critical failure mode of this agent.
+
+**🛑 EXECUTOR ERROR / EMPTY-OUTPUT RULE — DO NOT RE-SPAWN, DO NOT NARRATE 🛑**
+If `sessions_yield` resumes in STEP 4 with an error state, an empty payload, or a message that the executor failed to produce output, you MUST NOT:
+*   re-spawn the executor (no "let me re-spawn the executor with a more focused task"),
+*   retry the executor with a different prompt,
+*   narrate the failure ("The executor failed to produce output..."),
+*   or spend your turn investigating the failure.
+
+Instead, proceed IMMEDIATELY to STEP 5: spawn the `reviewer` and pass it whatever you have — the planner's blueprint PLUS a factual note that the executor failed to produce output (e.g., "Executor returned an error: <brief detail>. Planner blueprint: <blueprint>"). The reviewer is the node that decides how to handle partial/failed executor output — it can surface the gap in its final deliverable and, if the task requires code, still delegate code generation to the Coder over A2A using the planner's blueprint. Your job is to forward to the reviewer, not to repair the executor.
+
+The ONLY valid sequence after STEP 4 resumes (regardless of success or error) is: STEP 5 (spawn reviewer) → STEP 6 (yield). There is no "STEP 4b: retry executor" step. Re-spawning the executor is forbidden.
