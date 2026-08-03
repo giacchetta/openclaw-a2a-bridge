@@ -1,4 +1,6 @@
 .envrc
+.agents/*
+!.agents/sync.sh
 agents/*/.openclaw/*
 !agents/*/.openclaw/workspace/
 !agents/*/.openclaw/openclaw.json
