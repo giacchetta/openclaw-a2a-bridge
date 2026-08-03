@@ -1,4 +1,16 @@
-# AGENTS.md — A2A Network Architecture
+# AGENTS.md
+
+Before reading user requests or modifying ANY file, you MUST follow this exact execution sequence:
+
+1. **STEP 1 — GUARDRAILS CHECK**: Read `.agents/guardrails/*.md`. Any violation results in immediate execution termination.
+2. **STEP 2 — SYSTEM CORE RULES**: Read `.agents/core/*.md` to establish non-negotiable coding and quality standards.
+3. **STEP 3 — READ LOCAL ARCHITECTURE**: Read Section 2 below (`# Local Architecture Blueprint`). DO NOT execute recursive directory exploration scripts or spawn sub-agents to explore the codebase.
+4. **STEP 4 — EXECUTE TASK**: Perform the task adhering strictly to the above.
+5. **STEP 5 — ARCHITECTURE PROTOCOL**: Read `.agents/protocols/agents-md-protocol.md`. If your changes modified system boundaries, directory structures, or APIs, you MUST update Section 2 of this `AGENTS.md` file before completing your task.
+
+---
+
+# 🏛️ Local Architecture Blueprint
 
 > **Document status:** Production-ready PoC blueprint.
 > **Last updated:** 2026-08-01
