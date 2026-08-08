@@ -16,45 +16,52 @@
           "allowAgents": ["*"]
         },
         "tools": {
-          "profile": "full",
-          "alsoAllow": ["sessions_spawn", "sessions_yield", "subagents"],
-          "deny": [
-            "web_fetch",
-            "apply_patch",
-            "read",
-            "write",
-            "edit",
-            "exec"
-          ]
+          "profile": "full"
+          // Single-agent mode (#9): main is now the working agent.
+          // The tri-node deny list + spawn/yield alsoAllow are commented out
+          // so main has full tool access (exec, web_fetch, read/write/edit).
+          // Restore them to revive the orchestrator-only router (see tag v0.1.0).
+          // "alsoAllow": ["sessions_spawn", "sessions_yield", "subagents"],
+          // "deny": [
+          //   "web_fetch",
+          //   "apply_patch",
+          //   "read",
+          //   "write",
+          //   "edit",
+          //   "exec"
+          // ]
         }
-      },
-      {
-        "id": "planner",
-        "tools": {
-          "profile": "full"
-        },
-        "name": "planner",
-        "workspace": "/app/agents/coder/.openclaw/workspace/planner",
-        "agentDir": "/app/agents/coder/.openclaw/agents/planner/agent"
-      },
-      {
-        "id": "executor",
-        "tools": {
-          "profile": "full"
-        },
-        "name": "executor",
-        "workspace": "/app/agents/coder/.openclaw/workspace/executor",
-        "agentDir": "/app/agents/coder/.openclaw/agents/executor/agent"
-      },
-      {
-        "id": "reviewer",
-        "tools": {
-          "profile": "full"
-        },
-        "name": "reviewer",
-        "workspace": "/app/agents/coder/.openclaw/workspace/reviewer",
-        "agentDir": "/app/agents/coder/.openclaw/agents/reviewer/agent"
       }
+      // --- Tri-node sub-agents (PARKED, pending OpenClaw cross-agent fix; see issue #6, tag v0.1.0) ---
+      // To revive the planner -> executor -> reviewer loop, uncomment the entries
+      // below and restore main's deny list + alsoAllow above. See IDENTITY.tri-node.md.
+      // {
+      //   "id": "planner",
+      //   "tools": {
+      //     "profile": "full"
+      //   },
+      //   "name": "planner",
+      //   "workspace": "/app/agents/coder/.openclaw/workspace/planner",
+      //   "agentDir": "/app/agents/coder/.openclaw/agents/planner/agent"
+      // },
+      // {
+      //   "id": "executor",
+      //   "tools": {
+      //     "profile": "full"
+      //   },
+      //   "name": "executor",
+      //   "workspace": "/app/agents/coder/.openclaw/workspace/executor",
+      //   "agentDir": "/app/agents/coder/.openclaw/agents/executor/agent"
+      // },
+      // {
+      //   "id": "reviewer",
+      //   "tools": {
+      //     "profile": "full"
+      //   },
+      //   "name": "reviewer",
+      //   "workspace": "/app/agents/coder/.openclaw/workspace/reviewer",
+      //   "agentDir": "/app/agents/coder/.openclaw/agents/reviewer/agent"
+      // }
     ]
   },
   "gateway": {
