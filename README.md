@@ -23,7 +23,7 @@ Your Mac runs a Fedora virtual machine. Inside that VM, Podman hosts a small bri
 ```mermaid
 flowchart TD
     subgraph Mac["💻 macOS Host"]
-        WS["📁 openclaw-workspace<br/>(your code, live-mounted)"]
+        WS["📁 openclaw-a2a-bridge<br/>(your code, live-mounted)"]
     end
 
     subgraph VM["🐧 Fedora VM via Tart"]
@@ -34,7 +34,7 @@ flowchart TD
         end
     end
 
-    WS -- "VirtioFS mount" --> VM
+    WS -- "VirtioFS mount → /mnt/workspace" --> VM
     REG -. "registers" .-> RES
     REG -. "registers" .-> COD
     RES -- "A2A code delegation<br/>(reviewer → coder:3000)" --> COD
@@ -115,34 +115,53 @@ Both agents share the **same Docker image** and the **same internal architecture
 
 ## 🚀 Quick start
 
+> ⚠️ **Heads up:** the VS Code integrated terminal can't reach the VM's local subnet (a known VS Code regression). All commands that target the VM or containers go through a **tmux bridge** — a tmux server started from an interactive Terminal.app shell. The `vm-bridge.sh` helper automates this. See [AGENTS.md §10](./AGENTS.md#10-operational-notes) for the full details.
+
 ```bash
+# --- From an interactive Terminal.app shell (NOT the VS Code terminal) ---
+
+# Start the VM (if not already running)
+poc-openclaw-01   # alias: tart run poc-openclaw-01 --no-graphics --dir ~/GC/openclaw-a2a-bridge:tag=workspace &
+
+# Start the tmux bridge (idempotent — safe to re-run)
+./vm-bridge.sh start
+
+# --- Now from anywhere (including the VS Code agent terminal) ---
+
 # Build and launch the whole fleet
-podman-compose -f podman-compose.yml up -d --build
+./vm-bridge.sh run 'cd /mnt/workspace && podman-compose -f podman-compose.yml up -d --build'
+
+# Check fleet status (bridge + VM + containers)
+./vm-bridge.sh status
 
 # Watch an agent work
-podman logs -f researcher
+./vm-bridge.sh run 'podman logs researcher | tail -40'
 
 # Send a task from inside the network
-podman exec -it researcher curl -s http://coder:3000/a2a/tasks \
+./vm-bridge.sh run 'podman exec workspace_coder_1 curl -s http://researcher:3000/a2a/tasks \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"task","params":{"task":"hello"},"id":"1"}' | jq .
+  -d "{\"jsonrpc\":\"2.0\",\"method\":\"task\",\"params\":{\"task\":\"hello\"},\"id\":\"1\"}"'
 
 # Tear it all down
-podman-compose -f podman-compose.yml down
+./vm-bridge.sh run 'cd /mnt/workspace && podman-compose -f podman-compose.yml down'
+
+# Stop the tmux bridge (does NOT stop the VM)
+./vm-bridge.sh stop
 ```
 
-> 💡 The agent containers don't expose host ports by default. Use `podman exec` to reach them from inside the network, or add port mappings to `podman-compose.yml`.
+> 💡 The agent containers don't expose host ports by default. Use `podman exec` (via the bridge) to reach them from inside the network, or add port mappings to `podman-compose.yml`.
 
 ---
 
 ## 📁 Project layout
 
 ```
-openclaw-workspace/
+openclaw-a2a-bridge/
 ├── Dockerfile              # Shared agent image
 ├── ecosystem.config.js     # PM2 runs the bridge + gateway in each container
 ├── index.js                # The A2A Express bridge (network front door)
 ├── podman-compose.yml      # The whole fleet, declaratively
+├── vm-bridge.sh            # tmux bridge helper (agent terminal → VM)
 ├── AGENTS.md               # 📖 The full technical architecture reference
 └── agents/
     ├── researcher/.openclaw/   # Researcher's isolated brain

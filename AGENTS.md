@@ -13,7 +13,7 @@ Before reading user requests or modifying ANY file, you MUST follow this exact e
 # 🏛️ Local Architecture Blueprint
 
 > **Document status:** Production-ready PoC blueprint.
-> **Last updated:** 2026-08-01
+> **Last updated:** 2026-08-10
 
 ---
 ## 📝 Companion Document: `README.md`
@@ -66,17 +66,18 @@ The fleet currently consists of two specialized agents — **Researcher** and **
 ┌─────────────────────────────────────────────────────────────────┐
 │                        macOS Host                                │
 │                                                                 │
-│   ~/poc/openclaw-workspace/                                     │
+│   ~/GC/openclaw-a2a-bridge/                                     │
 │   ├── Dockerfile                                                │
 │   ├── ecosystem.config.js                                       │
 │   ├── index.js                                                  │
 │   ├── podman-compose.yml                                        │
+│   ├── vm-bridge.sh          (tmux bridge helper)                │
 │   ├── AGENTS.md                                                 │
 │   └── agents/                                                   │
 │       ├── researcher/.openclaw/  (planner, executor, reviewer)   │
 │       └── coder/.openclaw/      (planner, executor, reviewer)   │
 │                                                                 │
-│         │  VirtioFS mount                                        │
+│         │  VirtioFS mount → /mnt/workspace on the VM            │
 │         ▼                                                       │
 │ ┌─────────────────────────────────────────────────────────────┐ │
 │ │              Fedora VM (Tart: poc-openclaw-01)               │ │
@@ -169,7 +170,7 @@ External Client / Peer Agent
 
 ### File Sharing (VirtioFS)
 
-The local macOS workspace at `~/poc/openclaw-workspace` is mounted into the Fedora VM via **VirtioFS**. Podman then bind-mounts this directory into each container at `/app`:
+The local macOS workspace at `~/GC/openclaw-a2a-bridge` is mounted into the Fedora VM via **VirtioFS** at `/mnt/workspace` (configured via the Tart `--dir` flag: `--dir ~/GC/openclaw-a2a-bridge:tag=workspace`). Podman then bind-mounts this directory into each container at `/app`:
 
 ```yaml
 # podman-compose.yml (per-service)
@@ -177,7 +178,7 @@ volumes:
   - .:/app
 ```
 
-This means any change to agent configuration files (`.openclaw/` directories, prompt files, etc.) on the macOS host is immediately reflected inside the running containers without rebuilding the image.
+This means any change to agent configuration files (`.openclaw/` directories, prompt files, etc.) on the macOS host is immediately reflected inside the running containers without rebuilding the image. Scripts written on the macOS host are also directly executable on the VM at `/mnt/workspace/<script>.sh` — no `scp` needed.
 
 ### SELinux Configuration
 
@@ -610,77 +611,100 @@ Each agent container (`researcher`, `coder`) contains these sub-agents in its `.
 
 ## 10. Operational Notes
 
-### Build & Start the Fleet
+### The tmux Bridge (required for agent-terminal access to the VM)
 
-From the macOS host (or inside the Fedora VM where Podman is running):
+> ⚠️ **Read this first.** The VS Code agent terminal cannot reach the VM's local subnet (see §11, "VS Code agent terminal cannot reach the VM's local subnet"). All commands below that target the VM or the containers must go through the **tmux bridge** — a tmux server started from an interactive Terminal.app shell, which runs in a working network context.
+
+The helper script **`vm-bridge.sh`** (in the workspace root) automates the bridge. It must be started from an **interactive Terminal.app shell** (not the VS Code terminal), because the tmux server inherits the network context of the shell that launches it.
 
 ```bash
-# Build images and start all services
-podman-compose -f podman-compose.yml up -d --build
+# From an interactive Terminal.app shell (NOT the VS Code terminal):
 
-# View running containers
-podman ps
+# Start the VM (if not already running)
+poc-openclaw-01   # alias: tart run poc-openclaw-01 --no-graphics --dir ~/GC/openclaw-a2a-bridge:tag=workspace &
 
-# View logs for a specific service
-podman logs -f researcher
+# Start the tmux bridge (idempotent — safe to re-run)
+./vm-bridge.sh start
 
-# View PM2 process status inside a container
-podman exec -it researcher pm2 status
+# Check bridge + VM + fleet status
+./vm-bridge.sh status
+
+# Run a command on the VM via the bridge (prints output when done)
+./vm-bridge.sh run 'podman ps'
+
+# Stop the tmux bridge (does NOT stop the VM)
+./vm-bridge.sh stop
 ```
+
+Once the bridge is up, the **VS Code agent terminal** can run commands on the VM by calling `vm-bridge.sh run "<cmd>"`. The script sends the command into the tmux pane via `tmux send-keys`, waits for completion, and prints the captured output. Commands execute as `admin` on the VM over SSH.
+
+> **Why the bridge is needed:** the agent terminal's `ssh admin@192.168.64.3` fails with `No route to host`, but the same command inside the tmux session (started from Terminal.app) succeeds. The tmux server bridges the two network contexts.
+
+> **Workspace on the VM:** the macOS workspace is mounted at `/mnt/workspace` on the VM. Scripts written on the macOS host are immediately executable on the VM at that path — no `scp` needed.
+
+### Build & Start the Fleet
+
+From the **agent terminal** (via the bridge), or from an interactive shell that can reach the VM:
+
+```bash
+# Via the bridge (agent terminal)
+./vm-bridge.sh run 'cd /mnt/workspace && podman-compose -f podman-compose.yml up -d --build'
+
+# Or directly on the VM (interactive shell / SSH)
+cd /mnt/workspace && podman-compose -f podman-compose.yml up -d --build
+```
+
+```bash
+# View running containers (via the bridge)
+./vm-bridge.sh run 'podman ps'
+
+# View logs for a specific service (via the bridge)
+./vm-bridge.sh run 'podman logs researcher | tail -40'
+
+# View PM2 process status inside a container (via the bridge)
+./vm-bridge.sh run 'podman exec workspace_researcher_1 pm2 status'
+```
+
+> ⚠️ **Use `podman ps` (no `sudo`).** `podman-compose` runs rootless (as `admin`); `sudo podman ps` queries the separate root Podman store and shows nothing. See §11, "Rootless vs. root Podman store mismatch".
 
 ### Stop the Fleet
 
 ```bash
-podman-compose -f podman-compose.yml down
+# Via the bridge (agent terminal)
+./vm-bridge.sh run 'cd /mnt/workspace && podman-compose -f podman-compose.yml down'
+
+# Or directly on the VM
+cd /mnt/workspace && podman-compose -f podman-compose.yml down
 ```
 
 ### Send a Test Payload
 
-```bash
-# Query the Researcher agent
-curl -s http://localhost:<PORT>/a2a/tasks \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "task",
-    "params": { "task": "Summarize the latest advances in quantum error correction" },
-    "id": "test-001"
-  }' | jq .
-
-# Query the Coder agent
-curl -s http://localhost:<PORT>/a2a/tasks \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "task",
-    "params": { "task": "Write a Python script that fetches and parses an RSS feed" },
-    "id": "test-002"
-  }' | jq .
-
-# Discover an agent's card
-curl -s http://localhost:<PORT>/.well-known/agent.json | jq .
-
-# List all registered agents in Apicurio
-curl -s http://localhost:8080/apis/registry/v2/groups/default/artifacts | jq .
-```
-
-> **Note on ports:** Both `researcher` and `coder` listen on port `3000` internally, but neither exposes a host port mapping in the current compose file. To send requests from the macOS host, either add `ports: ["3001:3000"]` / `ports: ["3002:3000"]` to the compose file, or use `podman exec` to curl from within the network:
+The agent containers don't expose host ports, so test payloads are sent from **inside the network** via `podman exec`:
 
 ```bash
-# From inside the network
-podman exec -it researcher curl -s http://coder:3000/a2a/tasks \
+# Via the bridge (agent terminal) — query the Researcher from inside the Coder container
+./vm-bridge.sh run 'podman exec workspace_coder_1 curl -s http://researcher:3000/a2a/tasks \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"task","params":{"task":"hello"},"id":"1"}' | jq .
+  -d "{\"jsonrpc\":\"2.0\",\"method\":\"task\",\"params\":{\"task\":\"hello\"},\"id\":\"1\"}"'
+
+# Discover an agent's card (from inside the network)
+./vm-bridge.sh run 'podman exec workspace_researcher_1 curl -s http://coder:3000/.well-known/agent.json'
+
+# List all registered agents in Apicurio (from inside the network)
+./vm-bridge.sh run 'podman exec workspace_researcher_1 curl -s http://apicurio:8080/apis/registry/v2/groups/default/artifacts'
 ```
+
+> **Note on ports:** Both `researcher` and `coder` listen on port `3000` internally, but neither exposes a host port mapping in the current compose file. To send requests from the macOS host directly, add `ports: ["3001:3000"]` / `ports: ["3002:3000"]` to the compose file.
 
 ### Inspect Agent State
 
 ```bash
-# List files in the researcher's OpenClaw state directory
+# On the macOS host (the .openclaw directories are in the workspace)
 ls -la agents/researcher/.openclaw/
-
-# List files in the coder's OpenClaw state directory
 ls -la agents/coder/.openclaw/
+
+# On the VM (via the bridge) — same files via the VirtioFS mount
+./vm-bridge.sh run 'ls -la /mnt/workspace/agents/researcher/.openclaw/'
 ```
 
 ---
@@ -700,6 +724,8 @@ ls -la agents/coder/.openclaw/
 | **Sub-agent id casing** | `sessions_spawn` targets sub-agents by exact `id`; a mismatched case (e.g. `Executor` vs `executor`) silently fails to resolve | All sub-agent `id` values in `openclaw.json` are lowercase and match the IDs referenced in `IDENTITY.md`/`AGENTS.md` |
 | **Prompt-only A2A delegation does not fire** | The Researcher reviewer's "A2A Code Delegation" directive (POST code spec to Coder, don't write code yourself) is overridden by the model's task-completion instinct — the reviewer writes the code itself and Coder's bridge never receives a delegation. Proven across 4 end-to-end tests (2026-08-01) with both reviewer and executor as the delegation point. | **Pending structural enforcement.** The directive is in place as the intended design; making it actually fire is tracked in issues #6 (live with the limitation), #7 (plugin/extend OpenClaw to enforce deterministically), and #8 (fork/build a new runtime with first-class sub-agent delegation). The orchestrator guardrails (TRUNCATED-OUTPUT, STEP 5→6 ATOMIC, EXECUTOR ERROR) are in place and working. |
 | **Orchestrator early-termination (mitigated, not fully solved)** | The Researcher `main` orchestrator can end its turn mid-loop, capturing narration as the final answer and orphaning the reviewer. Triggered by truncated executor output, the step 5→6 gap, or executor errors. | Three guardrails in `main/IDENTITY.md` (TRUNCATED-OUTPUT RULE, STEP 5→6 ATOMIC, EXECUTOR ERROR / EMPTY-OUTPUT RULE) fix the known trigger paths. Test 5 showed a residual truncation-triggered early-termination still possible; full reliability likely requires the same structural enforcement as the delegation issue above. |
+| **VS Code agent terminal cannot reach the VM's local subnet** | After a VS Code upgrade, the VS Code integrated terminal (and any process it spawns, including system binaries like `/usr/bin/ssh`) cannot reach hosts on the VM's local subnet (`192.168.64.0/24`) or the LAN (`192.168.100.0/24`). Symptom: `No route to host`. Internet and tailnet IPs still work. The block is at the system network-extension layer, applies to the whole VS Code process session regardless of binary, and is NOT caused by Tailscale, pf, the macOS Application Firewall, TCC Local Network privacy (VS Code is granted), the VS Code agent sandbox (it's off), or the Electron sandbox. An interactive Terminal.app shell on the same Mac CAN reach the VM. | **tmux bridge.** A tmux server started from an interactive Terminal.app shell runs in a working network context. The agent sends commands into the tmux session via `tmux send-keys` and reads captured output from `/tmp` files. The helper script `vm-bridge.sh` (see §10) automates this. The workspace is VirtioFS-mounted at `/mnt/workspace` on the VM, so scripts written on the macOS host are immediately executable on the VM without copying. |
+| **Rootless vs. root Podman store mismatch** | `podman-compose` runs as the `admin` user → **rootless** Podman store (`/run/user/1000/containers`). `sudo podman ps` queries the **root** Podman store (separate, empty). Checking fleet status with `sudo podman ps` shows nothing even when the fleet is running. | Always use `podman ps` (no `sudo`) to inspect the fleet. The `vm-bridge.sh status` command does this correctly. |
 
 ---
 
