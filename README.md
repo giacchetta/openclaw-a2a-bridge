@@ -133,6 +133,8 @@ End-to-end testing surfaced one agent-platform limitation that shapes the curren
 
 Both agents share the **same Docker image** and the **same internal architecture** — only their persona and domain focus differ. Adding a third agent is mostly a matter of giving it its own identity and state directory.
 
+> 🔌 **MCP tool servers.** Each agent also runs one external **MCP (Model Context Protocol)** tool server alongside the built-in OpenClaw tools: the **Coder** gets a filesystem server (`@modelcontextprotocol/server-filesystem`) scoped to its workspace, and the **Researcher** gets an in-memory knowledge-graph server (`@modelcontextprotocol/server-memory`). MCP tools surface to the agent under the `bundle-mcp` plugin namespace (e.g. `files__list_directory`, `memory__create_entities`) and spawn lazily on first use. Live-tested 2026-08-11 — both servers start, accept tool calls, and return real results. See [AGENTS.md §12](./AGENTS.md#12-mcp-tool-servers) for the config shape and validation.
+
 ---
 
 ## 🚀 Quick start

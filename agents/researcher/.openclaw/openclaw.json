@@ -160,5 +160,19 @@
   "meta": {
     "lastTouchedVersion": "2026.6.11",
     "lastTouchedAt": "2026-07-13T12:43:56.092Z"
+  },
+  // MCP tool servers (#12) — top-level mcp.servers block (NOT under plugins).
+  // Tools surface to the agent under the bundle-mcp plugin id as memory__<tool>.
+  // No toolFilter = all server tools exposed (create_entities, read_graph, etc.).
+  // Servers spawn lazily on first tool invocation, not at gateway boot.
+  // To pick up config changes: sudo podman restart workspace_researcher_1 (NOT pm2 restart).
+  // See AGENTS.md §12 for the full config shape and live-test evidence.
+  "mcp": {
+    "servers": {
+      "memory": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-memory"]
+      }
+    }
   }
 }

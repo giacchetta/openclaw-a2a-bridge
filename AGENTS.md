@@ -13,7 +13,7 @@ Before reading user requests or modifying ANY file, you MUST follow this exact e
 # 🏛️ Local Architecture Blueprint
 
 > **Document status:** Production-ready PoC blueprint.
-> **Last updated:** 2026-08-11
+> **Last updated:** 2026-08-11 (MCP tool servers added, §12)
 
 ---
 ## 📝 Companion Document: `README.md`
@@ -44,6 +44,7 @@ This repository also ships a human-oriented **[`README.md`](./README.md)** — a
 9. [Fleet Inventory](#9-fleet-inventory)
 10. [Operational Notes](#10-operational-notes)
 11. [Known Constraints & Workarounds](#11-known-constraints--workarounds)
+12. [MCP Tool Servers](#12-mcp-tool-servers)
 
 ---
 
@@ -632,6 +633,17 @@ Each agent container (`researcher`, `coder`) contains these sub-agents in its `.
 
 > **Coder parity (Phase 1):** Both agents share the same single-agent architecture: `main` is the working agent with full tool access; the tri-node sub-agents are commented out identically. The planner `id` is lowercase (`planner`) to match the `sessions_spawn` casing requirement (relevant when the tri-node is revived).
 
+### MCP Tool Servers (per agent)
+
+In addition to the built-in OpenClaw tools, each agent container runs **one MCP (Model Context Protocol) tool server** configured in its `openclaw.json` under a top-level `mcp.servers` block. MCP tools are exposed to the agent as plugin-owned tools under the `bundle-mcp` plugin id, with the naming convention `<serverName>__<toolName>` (e.g. `files__list_directory`, `memory__create_entities`). Because both agents use `tools.profile: "full"`, MCP tools are visible by default; `tools.deny: ["bundle-mcp"]` would disable them.
+
+| Agent | MCP Server | Config key | Root / Scope | Tools (filtered) |
+|-------|-----------|-----------|-------------|------------------|
+| **Coder** | `@modelcontextprotocol/server-filesystem` | `mcp.servers.files` | `/app/agents/coder/.openclaw/workspace` | `read_file`, `write_file`, `list_directory`, `search_files` (via `toolFilter.include`) |
+| **Researcher** | `@modelcontextprotocol/server-memory` | `mcp.servers.memory` | N/A (in-memory knowledge graph) | All tools (no `toolFilter`) — `create_entities`, `read_graph`, etc. |
+
+Both servers use the **stdio transport** (`{command, args, toolFilter}`). MCP servers spawn **lazily** — on the first agent session that invokes an MCP tool, not at gateway boot. See [§12 MCP Tool Servers](#12-mcp-tool-servers) for the full config shape, validation, and live-test evidence.
+
 ---
 
 ## 10. Operational Notes
@@ -730,6 +742,31 @@ ls -la agents/coder/.openclaw/
 ./vm-bridge.sh run 'ls -la /mnt/workspace/agents/researcher/.openclaw/'
 ```
 
+### Picking Up New MCP Config (restart the container, not just PM2)
+
+MCP server config lives in `openclaw.json` under `mcp.servers` (see [§12](#12-mcp-tool-servers)). The gateway reads this block at startup. To pick up a new or changed MCP server config, **restart the whole container** so PM2 (as PID 1) respawns both processes fresh:
+
+```bash
+# Via the bridge (agent terminal) — cleanest way to pick up new MCP config
+./vm-bridge.sh run 'sudo podman restart workspace_coder_1 workspace_researcher_1'
+```
+
+> ⚠️ **Do NOT use `pm2 restart openclaw-gateway` to pick up MCP config.** It can orphan the old gateway process on port 18789, causing an `EADDRINUSE` crash loop ("restart-loop breaker tripped: N unclean boot(s)"). The container restart avoids this entirely. See [§11](#11-known-constraints--workarounds) for the constraint row.
+
+### Validate an MCP Server (`openclaw mcp doctor --probe`)
+
+The `openclaw mcp doctor <name> --probe` CLI opens a live MCP connection and lists the server's tools — it validates that the server starts independently of the agent run:
+
+```bash
+# Via the bridge (agent terminal) — validate the coder's filesystem MCP
+./vm-bridge.sh run 'sudo podman exec workspace_coder_1 openclaw mcp doctor files --probe'
+
+# Validate the researcher's memory MCP
+./vm-bridge.sh run 'sudo podman exec workspace_researcher_1 openclaw mcp doctor memory --probe'
+```
+
+A result of `files: ok` / `memory: ok` means the server starts and its tools are reachable. The full MCP CLI surface: `openclaw mcp list/show/set/add/configure/tools/login/logout/reload/unset/doctor/probe`.
+
 ---
 
 ## 11. Known Constraints & Workarounds
@@ -748,6 +785,106 @@ ls -la agents/coder/.openclaw/
 | **Sub-agent + A2A cross-agent calls do not work in OpenClaw** | OpenClaw sub-agents cannot reliably drive cross-agent A2A calls, and the prompt-level delegation directive (Researcher's reviewer → Coder) is overridden by the model's task-completion instinct — the reviewer writes the code itself and Coder's bridge never receives a delegation. Proven across 4 end-to-end tests (2026-08-01) with both reviewer and executor as the delegation point. | **Single-agent mode (#9).** The tri-node design is parked pending an OpenClaw fix; artifacts are preserved via JSON5 comments in `openclaw.json`, `IDENTITY.tri-node.md`, and git tag `v0.1.0` (commit `5e428c0`). In single-agent mode, the Researcher's `main` curls the Coder's bridge directly when a task needs code — cross-agent A2A works end-to-end (live-tested 2026-08-11, #10). Making the tri-node fire deterministically is tracked in issues #6 (umbrella), #7 (plugin/extend OpenClaw), and #8 (fork/build a new runtime). |
 | **Orchestrator early-termination (moot in single-agent mode)** | The Researcher `main` orchestrator can end its turn mid-loop, capturing narration as the final answer and orphaning the reviewer. Triggered by truncated executor output, the step 5→6 gap, or executor errors. | **Moot in single-agent mode (#9):** `main` does the task itself — there is no spawn loop to terminate early, so this failure mode does not arise. The three guardrails (TRUNCATED-OUTPUT RULE, STEP 5→6 ATOMIC, EXECUTOR ERROR / EMPTY-OUTPUT RULE) are preserved in `IDENTITY.tri-node.md` and will apply again when the tri-node is revived. Full reliability at that point likely requires the same structural enforcement as the sub-agent/A2A issue above. |
 | **VS Code agent terminal cannot reach the VM's local subnet** | After a VS Code upgrade, the VS Code integrated terminal (and any process it spawns, including system binaries like `/usr/bin/ssh`) cannot reach hosts on the VM's local subnet (`192.168.64.0/24`) or the LAN (`192.168.100.0/24`). Symptom: `No route to host`. Internet and tailnet IPs still work. The block is at the system network-extension layer, applies to the whole VS Code process session regardless of binary, and is NOT caused by Tailscale, pf, the macOS Application Firewall, TCC Local Network privacy (VS Code is granted), the VS Code agent sandbox (it's off), or the Electron sandbox. An interactive Terminal.app shell on the same Mac CAN reach the VM. | **tmux bridge.** A tmux server started from an interactive Terminal.app shell runs in a working network context. The agent sends commands into the tmux session via `tmux send-keys` and reads captured output from `/tmp` files. The helper script `vm-bridge.sh` (see §10) automates this. The workspace is VirtioFS-mounted at `/mnt/workspace` on the VM, so scripts written on the macOS host are immediately executable on the VM without copying. |
+| **`pm2 restart openclaw-gateway` orphans the old gateway on port 18789** | `pm2 restart openclaw-gateway` can leave the OLD gateway process alive (holding port 18789) while spawning a new instance that can't bind, producing an `EADDRINUSE` crash loop ("restart-loop breaker tripped: N unclean boot(s) within 300000ms"). The container has no `lsof`/`ss`/`netstat` to find the orphan PID. This is a PM2/orphan-process issue, NOT an MCP config problem. | **Restart the whole container** to pick up new config (e.g. new MCP servers): `sudo podman restart <container>`. PM2 (as PID 1) respawns both processes fresh, clearing all orphans, lock files, and the restart counter. Do NOT use `pm2 restart openclaw-gateway` for config reloads, and do NOT chase orphan PIDs with `kill -9` (it causes more flapping). Manage processes through PM2 only (`pm2 start/stop/restart/status/logs`); for a full clean reset, use `podman restart`. |
+
+---
+
+## 12. MCP Tool Servers
+
+Each agent container runs **one MCP (Model Context Protocol) tool server** alongside the built-in OpenClaw tools. MCP is an open protocol that lets agents call external tool servers; OpenClaw exposes MCP tools to the agent as plugin-owned tools under the `bundle-mcp` plugin id.
+
+### Configuration Location
+
+MCP servers are configured in the agent's `openclaw.json` (JSON5) under a **top-level `mcp.servers` block** — NOT under `plugins` (which stays `{}`). Each key under `mcp.servers` is the server name (used in the tool namespace).
+
+### Config Shape (stdio transport)
+
+```json5
+// agents/coder/.openclaw/openclaw.json (excerpt)
+"mcp": {
+  "servers": {
+    "files": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/app/agents/coder/.openclaw/workspace"],
+      "toolFilter": {
+        "include": ["read_file", "write_file", "list_directory", "search_files"]
+      }
+    }
+  }
+}
+```
+
+```json5
+// agents/researcher/.openclaw/openclaw.json (excerpt)
+"mcp": {
+  "servers": {
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+      // no toolFilter = all tools exposed
+    }
+  }
+}
+```
+
+| Field | Purpose |
+|-------|---------|
+| `command` + `args` | The stdio command to launch the MCP server (here `npx -y @modelcontextprotocol/server-*`). |
+| `toolFilter.include` / `toolFilter.exclude` | Restrict which of the server's tools are exposed to the agent. Omitting `toolFilter` exposes all tools. |
+| `env`, `cwd` | Optional environment variables and working directory for the server process. |
+| `mcp.sessionIdleTtlMs` | Optional top-level field (default `600000`ms) — how long an idle MCP session is kept alive before teardown. |
+
+> **HTTP transport** (not used in this PoC, but supported): `{ url, transport: "streamable-http"|"sse", headers, auth: "oauth", timeout, connectTimeout, sslVerify, clientCert, clientKey, supportsParallelToolCalls, toolFilter }`.
+
+### How MCP Tools Appear to the Agent
+
+- MCP tools are exposed as **plugin-owned tools under the `bundle-mcp` plugin id**.
+- Tool naming convention: `<serverName>__<toolName>` — e.g. `files__list_directory`, `memory__create_entities`, `memory__read_graph`.
+- Visibility follows the tool profile: MCP tools appear in the `coding` and `messaging` profiles. Both agents use `tools.profile: "full"`, so MCP tools are **visible by default**. To disable: `tools.deny: ["bundle-mcp"]`. In sandbox mode: add `bundle-mcp` to `alsoAllow`.
+- MCP servers spawn **lazily** — on the first agent session that invokes an MCP tool, not at gateway boot. The gateway log line `bundle-mcp:<name>: <ServerName> running on stdio` marks the spawn.
+
+### Deployed Servers
+
+| Agent | Server name | Package | Root / Scope | Exposed tools |
+|-------|-----------|---------|-------------|---------------|
+| **Coder** | `files` | `@modelcontextprotocol/server-filesystem` | `/app/agents/coder/.openclaw/workspace` | `read_file`, `write_file`, `list_directory`, `search_files` (filtered) |
+| **Researcher** | `memory` | `@modelcontextprotocol/server-memory` | in-memory knowledge graph | `create_entities`, `create_relations`, `add_observations`, `read_graph`, etc. (all) |
+
+### Validation + Live-Test Evidence (2026-08-11, #12)
+
+**Config validation** — `openclaw mcp doctor <name> --probe` opens a live MCP connection and lists tools:
+
+```
+$ openclaw mcp doctor files --probe   # in the coder container
+files: ok
+$ openclaw mcp doctor memory --probe  # in the researcher container
+memory: ok
+```
+
+**Live tool invocation** — sending a task that asks the agent to use an MCP tool produces these gateway log lines (proof the MCP server spawned and the tool was called):
+
+```
+# Coder (filesystem MCP)
+bundle-mcp:files: Secure MCP Filesystem Server running on stdio
+bundle-mcp:files: Client does not support MCP Roots, using allowed directories set from server args: [ '/app/agents/coder/.openclaw/workspace' ]
+[agent/embedded] embedded run tool start: tool=files__list_directory toolCallId=call_47771e4f...
+[agent/embedded] embedded run tool end:   tool=files__list_directory toolCallId=call_47771e4f...
+
+# Researcher (memory MCP)
+bundle-mcp:memory: Knowledge Graph MCP Server running on stdio
+[agent/embedded] embedded run tool start: tool=memory__create_entities toolCallId=call_21b96422...
+[agent/embedded] embedded run tool end:   tool=memory__create_entities toolCallId=call_21b96422...
+[agent/embedded] embedded run tool start: tool=memory__read_graph     toolCallId=call_da8d19a0...
+[agent/embedded] embedded run tool end:   tool=memory__read_graph     toolCallId=call_da8d19a0...
+```
+
+Both runs returned `status: "success"`, `runStatus: "ok"` in the JSON-RPC response. The Coder's `list_directory` returned the real workspace contents; the Researcher's `create_entities` + `read_graph` returned the created entity and the knowledge graph. (The Coder's output carried markdown fences — the known output-hygiene issue from #10, not an MCP issue.)
+
+### Operational Notes
+
+- **Picking up new MCP config:** restart the whole container (`sudo podman restart <container>`) so PM2 respawns both processes fresh. Do NOT use `pm2 restart openclaw-gateway` — it can orphan the old gateway on port 18789 (see [§11](#11-known-constraints--workarounds)).
+- **MCP CLI surface:** `openclaw mcp list/show/set/add/configure/tools/login/logout/reload/unset/doctor/probe`. Use `set <name> <json>` to write a server config; `doctor <name> --probe` to validate it starts.
+- **Adding a new MCP server:** add an entry under `mcp.servers` in the agent's `openclaw.json`, then restart the container. The server will spawn lazily on first tool invocation.
 
 ---
 
