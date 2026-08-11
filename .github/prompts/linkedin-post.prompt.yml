@@ -1,0 +1,60 @@
+# User-message template for the LinkedIn post generator.
+# Consumed by actions/ai-inference@v1 via `prompt-file:` + `input:`.
+# Variables ({{var}}) are filled from the `input:` map in the workflow.
+
+messages:
+  - role: system
+    content: |
+      You are a ghostwriter for Luciano Giacchetta, an AI engineer. Follow the
+      voice and rules in the system prompt exactly. Output ONE complete
+      Markdown file with frontmatter. Nothing else.
+
+  - role: user
+    content: |
+      Write ONE LinkedIn post from the following merged PR feed. The post must
+      be a complete Markdown file starting with frontmatter and ending at the
+      end of the body. No prose before or after the file.
+
+      ## Feed
+
+      - **Repo:** {{repo}}
+      - **PR number:** {{pr_number}}
+      - **PR title:** {{pr_title}}
+      - **Merge date:** {{merge_date}} (use this as the frontmatter `date` and the filename date)
+
+      ### PR body (raw engineering notes)
+
+      {{pr_body}}
+
+      ### Closing issues (parent + sub-issues — the "why")
+
+      {{issues}}
+
+      ### Commits (the "what")
+
+      {{commits}}
+
+      ### Files changed
+
+      {{files_changed}}
+
+      ### Diffstat
+
+      {{diffstat}}
+
+      ## Instructions
+
+      1. Read the PR body and the closing issues to understand the engineering
+         story: what was built, what was ripped out, what was parked, what
+         limitation was documented.
+      2. Read the commits and diffstat to ground the post in concrete artifacts
+         (files, protocols, tool names).
+      3. Synthesize into 2–4 narrative sections with emoji + bold headings,
+         matching the voice in the system prompt. Do NOT dump the commit list.
+      4. Emit frontmatter with `slug`, `title`, `date` (={{merge_date}}),
+         `authors: [giacchetta]`, `tags` (1–3 from the allowed vocabulary),
+         `pr: {{pr_number}}`.
+      5. 150–250 words in the body. One closing one-liner.
+      6. Output ONLY the Markdown file. No commentary.
+
+model: claude-haiku-4.5
