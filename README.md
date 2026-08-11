@@ -33,6 +33,8 @@ flowchart TD
             REG["📋 Apicurio Registry<br/>Agent discovery"]
             RES["🔬 Researcher<br/>agent container (main)"]
             COD["💻 Coder<br/>agent container (main)"]
+            MCPMEM["🧠 memory MCP<br/>(knowledge graph)"]
+            MCPFILES["📁 files MCP<br/>(filesystem)"]
         end
     end
 
@@ -41,7 +43,11 @@ flowchart TD
     REG -. "registers" .-> COD
     RES -- "A2A code delegation<br/>(main → coder:3000)" --> COD
     COD -. "one-way only<br/>(Coder never calls back)" .-> RES
+    RES -. "lazy spawn + tool calls<br/>(bundle-mcp:memory)" .-> MCPMEM
+    COD -. "lazy spawn + tool calls<br/>(bundle-mcp:files)" .-> MCPFILES
 ```
+
+> 🔌 Each agent also runs one **MCP tool server** (dashed edges above): the Researcher gets an in-memory knowledge-graph server (`@modelcontextprotocol/server-memory`), the Coder gets a filesystem server (`@modelcontextprotocol/server-filesystem`) scoped to its workspace. MCP servers spawn lazily on first tool invocation, not at gateway boot. Live-tested 2026-08-11 — see [AGENTS.md §12](./AGENTS.md#12-mcp-tool-servers).
 
 > ✅ The Researcher→Coder edge is a **working direct A2A call** in single-agent mode: when the Researcher's `main` gets a task that needs code, it curls the Coder's bridge, the Coder's `main` generates the code, and the Researcher folds `result.output` into its answer. Live-tested 2026-08-11. The dashed return edge marks the one-way boundary (Coder never calls back).
 
@@ -55,6 +61,7 @@ sequenceDiagram
     participant B as 🌉 A2A Express Bridge
     participant G as 🧠 OpenClaw Gateway
     participant M as 🤖 Root Agent (main)
+    participant MCP as 🔌 MCP Tool Server
 
     C->>B: POST /a2a/tasks (JSON-RPC)
     B->>G: WebSocket connect (auth)
@@ -63,9 +70,13 @@ sequenceDiagram
     G-->>B: runId (accepted)
     B->>G: subscribe to chat events
     Note over G,M: main does the task itself<br/>(single-agent mode — no spawn tree)
+    M->>MCP: tool call (lazy spawn on first use)
+    MCP-->>M: tool result
     G-->>B: final synthesized chat event<br/>(same runId)
     B-->>C: JSON-RPC result envelope
 ```
+
+> 🔌 The MCP Tool Server participant represents the per-agent MCP server (Coder: `files`, Researcher: `memory`). It spawns lazily on the first tool call within the run and stays alive for the session. Not every task invokes an MCP tool — the interaction above is optional.
 
 ### Inside an agent: one working agent (single-agent mode)
 
@@ -76,8 +87,12 @@ flowchart LR
     IN["📨 Task in"] --> MAIN["🤖 Root Agent<br/>(main — working agent)"]
     MAIN -- "needs code?" --> COD["💻 Coder<br/>(A2A call, one-way)"]
     COD --> MAIN
+    MAIN -. "MCP tool calls<br/>(lazy spawn)" .-> MCP["🔌 MCP Server<br/>(files / memory)"]
+    MCP -. "tool results" .-> MAIN
     MAIN --> OUT["📦 Pristine deliverable out"]
 ```
+
+> 🔌 The MCP Server node is the per-agent external tool server: `files` (`@modelcontextprotocol/server-filesystem`) for the Coder, `memory` (`@modelcontextprotocol/server-memory`) for the Researcher. It spawns lazily on first tool invocation and surfaces tools under the `bundle-mcp` plugin namespace (e.g. `files__list_directory`, `memory__create_entities`).
 
 | Agent | Job | Won't do |
 |------|-----|----------|
@@ -96,9 +111,13 @@ flowchart LR
     IN["📨 Task in"] --> MAIN["🤖 Root Agent<br/>(main — orchestrator)"]
     MAIN --> P["🧭 Planner<br/>thinks, doesn't act"]
     P --> E["🛠️ Executor<br/>runs tools, collects data"]
+    E -. "MCP tool calls<br/>(lazy spawn)" .-> MCP["🔌 MCP Server<br/>(files / memory)"]
+    MCP -. "tool results" .-> E
     E --> R["✅ Reviewer<br/>audits & polishes"]
     R --> OUT["📦 Pristine deliverable out"]
 ```
+
+> 🔌 The MCP Server node is the same per-agent external tool server as in single-agent mode (`files` for the Coder, `memory` for the Researcher). In the tri-node design the executor is the node that runs tools, so it would be the one invoking MCP tools. The MCP config is independent of the agent architecture — it works the same in either mode.
 
 | Node | Job | Won't do |
 |------|-----|----------|
