@@ -36,6 +36,8 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      ACTIONS_STEP_DEBUG: true
     steps:
       - name: Checkout this repo
         uses: actions/checkout@v6
@@ -133,10 +135,10 @@ jobs:
           fi
           echo "::endgroup::"
 
-      - name: Upload post artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: post-${{ steps.pr.outputs.number }}
-          path: ${{ steps.ai.outputs.response-file }}
-          if-no-files-found: warn
+      # - name: Upload post artifact
+      #   if: always()
+      #   uses: actions/upload-artifact@v7.0.1
+      #   with:
+      #     name: post-${{ steps.pr.outputs.number }}
+      #     path: ${{ steps.ai.outputs.response-file }}
+      #     if-no-files-found: warn
