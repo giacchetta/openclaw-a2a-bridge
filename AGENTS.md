@@ -13,7 +13,7 @@ Before reading user requests or modifying ANY file, you MUST follow this exact e
 # 🏛️ Local Architecture Blueprint
 
 > **Document status:** Production-ready PoC blueprint.
-> **Last updated:** 2026-08-10
+> **Last updated:** 2026-08-11
 
 ---
 ## 📝 Companion Document: `README.md`
@@ -51,12 +51,14 @@ This repository also ships a human-oriented **[`README.md`](./README.md)** — a
 
 This repository implements a **centralized Agent-to-Agent (A2A) network** in which multiple OpenClaw-powered agent containers communicate over a shared Docker bridge network using JSON-RPC 2.0 payloads. Each container runs two processes managed by PM2:
 
-1. **A2A Express Bridge** (`index.js`) — an HTTP server that receives JSON-RPC task requests, routes them to the local OpenClaw root agent via the CLI, and returns structured JSON responses.
-2. **OpenClaw Gateway** — the OpenClaw runtime that manages the agent's cognitive loop, sub-agent delegation, and tool execution.
+1. **A2A Express Bridge** (`index.js`) — an HTTP server that receives JSON-RPC task requests, routes them to the local OpenClaw root agent over the Gateway WebSocket, and returns structured JSON responses.
+2. **OpenClaw Gateway** — the OpenClaw runtime that runs the agent's cognitive loop and tool execution.
 
 An **Apicurio Registry** container serves as a lightweight service-discovery layer: each agent registers an **Agent Card** (metadata describing its role, protocols, and endpoint) on startup, allowing other agents or external clients to discover and address peers dynamically.
 
 The fleet currently consists of two specialized agents — **Researcher** and **Coder** — each sharing the same Docker image but customized through environment variables and isolated `.openclaw` state directories.
+
+> **Operating mode — single-agent-per-container (#9, #11).** Each container runs **one working agent** (`main`) that does the task itself using full tool access. The original **tri-node** design (planner → executor → reviewer sub-agents, with the Researcher's reviewer delegating code to the Coder over A2A) is **parked** as future work pending an OpenClaw fix: OpenClaw sub-agents cannot reliably drive cross-agent A2A calls, and the prompt-level delegation directive was overridden by the model's task-completion instinct. The tri-node artifacts are **preserved, not deleted** — sub-agent entries are commented out in `openclaw.json` (JSON5), the orchestrator prompts are saved as `IDENTITY.tri-node.md`, the sub-agent directories are untouched, and git tag `v0.1.0` (commit `5e428c0`) is the revival baseline. Cross-agent A2A **does** work in single-agent mode: the Researcher's `main` curls the Coder's bridge directly when a task needs code (see §8). See §8 for the parked design and revival path, and §11 for the constraint that parked it.
 
 ---
 
@@ -74,8 +76,10 @@ The fleet currently consists of two specialized agents — **Researcher** and **
 │   ├── vm-bridge.sh          (tmux bridge helper)                │
 │   ├── AGENTS.md                                                 │
 │   └── agents/                                                   │
-│       ├── researcher/.openclaw/  (planner, executor, reviewer)   │
-│       └── coder/.openclaw/      (planner, executor, reviewer)   │
+│       ├── researcher/.openclaw/  (main; planner/executor/        │
+│       │                          reviewer PARKED, see §8)       │
+│       └── coder/.openclaw/      (main; planner/executor/        │
+│                                    reviewer PARKED, see §8)     │
 │                                                                 │
 │         │  VirtioFS mount → /mnt/workspace on the VM            │
 │         ▼                                                       │
@@ -129,12 +133,12 @@ External Client / Peer Agent
 │       c. subscribe to `chat` events for            │
 │            sessionKey=agent:main:main; wait for    │
 │            the final synthesized assistant         │
-│            message (arrives under a RESUMED        │
-│            runId after the spawn tree finishes).   │
-│            `agent.wait` is raced only for early    │
-│            error detection — it resolves at the    │
-│            FIRST sessions_yield, NOT at spawn-tree │
-│            completion.                             │
+│            message.                                │
+│       d. `agent.wait` is raced in parallel for     │
+│            early error detection. In single-agent  │
+│            mode there is no sessions_yield, so     │
+│            agent.wait resolves at run completion    │
+│            (not at the first yield, as in tri-node).│
 │  5. Wrap synthesized result in JSON-RPC envelope    │
 └───────────┬───────────────────────────────────────┘
             │
@@ -143,15 +147,16 @@ External Client / Peer Agent
 │   OpenClaw Gateway (PM2 → npx openclaw gateway run) │
 │   WS server on 127.0.0.1:18789 (token auth)         │
 │                                                    │
-│   Root Agent (main)                                │
-│     ├── planner   (sessions_spawn, non-blocking)   │
-│     ├── executor  (sessions_spawn, non-blocking)   │
-│     └── reviewer  (sessions_spawn, non-blocking)   │
+│   Root Agent (main) — single-agent mode (#9):       │
+│     main does the task ITSELF using full tool       │
+│     access (exec, web_fetch, read/write/edit).      │
+│     No sessions_spawn / sessions_yield; no spawn   │
+│     tree. On the Researcher, main curls the Coder   │
+│     bridge directly when a task needs code (§8).    │
 │                                                    │
-│   main calls sessions_yield (ends the ORIGINAL      │
-│   runId's turn); sub-agents run in the background; │
-│   the main session's final synthesized message     │
-│   arrives later under a RESUMED runId (new turn).  │
+│   [PARKED — tri-node: planner/executor/reviewer     │
+│    sub-agents via sessions_spawn. See §8 + tag      │
+│    v0.1.0 for the revival path.]                    │
 └───────────────────────────────────────────────────┘
 ```
 
@@ -263,6 +268,8 @@ The Express bridge is the network-facing component of each agent container. It e
 
 ### Why the bridge speaks the Gateway WebSocket, not the CLI
 
+> **Single-agent mode note (#9, #11):** In the current operating mode there is **no spawn tree** — `main` does the task itself and never calls `sessions_yield`. The WS lifecycle below is therefore simpler in practice: `agent.wait` resolves at **run completion** (not at a first yield), and the final `chat` event arrives on the **same runId** (not a resumed one). The tri-node rationale and the "resumed runId" semantics are preserved below as the **historical/future** rationale — they describe the behavior the bridge was originally built to handle and will apply again if the tri-node is revived (see §8). The bridge code is unchanged; only the runtime behavior differs.
+
 The original bridge shelled out to the OpenClaw CLI:
 
 ```bash
@@ -279,10 +286,12 @@ The fix is to use the documented Gateway WebSocket lifecycle, which separates **
 |------|-------------------|---------|-----------|
 | 1 | `connect` (challenge-first, device-signed) | `hello-ok` | Handshake + token auth |
 | 2 | `agent` | `{ runId, acceptedAt }` | Accept the run (fire-and-forget) |
-| 3 | `chat` events (subscribed) | final assistant message | **Wait for the main session's final synthesized `chat` event** (`sessionKey=agent:main:main`, `state=final`, `role=assistant`). This arrives under a **resumed runId** (new turn) AFTER the whole spawn tree finishes. |
-| 4 | `agent.wait` (raced, error-only) | `{ status, startedAt, endedAt, error? }` | Resolves at the **first `sessions_yield`** (lifecycle end of the ORIGINAL runId) — NOT at spawn-tree completion. Used only to surface early errors; its resolution is NOT treated as completion. |
+| 3 | `chat` events (subscribed) | final assistant message | **Wait for the main session's final synthesized `chat` event** (`sessionKey=agent:main:main`, `state=final`, `role=assistant`). In tri-node mode this arrives under a **resumed runId** (new turn) AFTER the whole spawn tree finishes; in single-agent mode it arrives on the **same runId** when `main` completes. |
+| 4 | `agent.wait` (raced, error-only) | `{ status, startedAt, endedAt, error? }` | Resolves at the **first `sessions_yield`** (lifecycle end of the ORIGINAL runId) — NOT at spawn-tree completion. Used only to surface early errors; its resolution is NOT treated as completion. **In single-agent mode there is no `sessions_yield`, so `agent.wait` resolves at run completion** — but it is still raced only for early-error detection; the `chat` event remains the source of truth. |
 
-> ⚠️ **`agent.wait` does NOT block until the spawn tree finishes.** It resolves at the first `sessions_yield`, which ends the original runId's turn. Sub-agents (planner → executor → reviewer) keep running in the background; the main session's final synthesized message arrives later under a **resumed runId** (new turn). The bridge therefore waits for the main session's final `chat` event, not for `agent.wait`.
+> ⚠️ **`agent.wait` does NOT block until the spawn tree finishes (tri-node mode).** It resolves at the first `sessions_yield`, which ends the original runId's turn. Sub-agents (planner → executor → reviewer) keep running in the background; the main session's final synthesized message arrives later under a **resumed runId** (new turn). The bridge therefore waits for the main session's final `chat` event, not for `agent.wait`.
+>
+> **In single-agent mode (#9)** there is no `sessions_yield` and no spawn tree, so `agent.wait` resolves at run completion and the final `chat` event arrives on the same runId. The bridge still treats the `chat` event as the source of truth and uses `agent.wait` only to surface early errors.
 
 > ⚠️ **`sessions.history` is NOT used.** It requires the `operator.admin` scope; the device is approved for `operator.write` only, so `sessions.history` triggers `PAIRING_REQUIRED`. The result is read from the `chat` event stream instead.
 
@@ -343,7 +352,7 @@ Accepts a JSON-RPC 2.0 payload and routes the task to the local OpenClaw root ag
 1. The bridge extracts `payload.params.task` (falling back to `"status"` if absent).
 2. It opens a WebSocket to `GATEWAY_WS_URL` and performs the `connect` handshake with `GATEWAY_AUTH_TOKEN`.
 3. It sends an `agent` request with `{ agentId, sessionKey, message, idempotencyKey }` and captures `runId`.
-4. It subscribes to `chat` events for `sessionKey=agent:main:main` and waits for the final synthesized assistant message. In parallel, it races `agent.wait` with `{ runId, timeoutMs: RUN_TIMEOUT_MS }` **for early error detection only** — `agent.wait` resolves at the first `sessions_yield` (NOT at spawn-tree completion), so its resolution is not treated as completion; only an error on `agent.wait` is surfaced. The main session's final synthesized message arrives later under a resumed runId (new turn) after the whole spawn tree (planner → executor → reviewer) finishes.
+4. It subscribes to `chat` events for `sessionKey=agent:main:main` and waits for the final synthesized assistant message. In parallel, it races `agent.wait` with `{ runId, timeoutMs: RUN_TIMEOUT_MS }` **for early error detection only** — `agent.wait` resolves at the first `sessions_yield` (NOT at spawn-tree completion), so its resolution is not treated as completion; only an error on `agent.wait` is surfaced. In single-agent mode (#9) there is no `sessions_yield`, so `agent.wait` resolves at run completion and the final `chat` event arrives on the same runId; in tri-node mode the main session's final synthesized message arrives later under a resumed runId (new turn) after the whole spawn tree (planner → executor → reviewer) finishes.
 5. The final assistant content (captured from the `chat` event stream, with fallbacks to concatenated deltas and `lastFinalText` when the final event has `hasMsg=false`) is collapsed to a string and parsed as JSON when possible (falling back to the raw string), then wrapped in a JSON-RPC 2.0 response envelope.
 
 **Success response:**
@@ -468,8 +477,8 @@ The bridge uses the documented WS lifecycle:
 |-------------------|---------|
 | `connect` (challenge-first, device-signed) | Handshake + token auth (`GATEWAY_AUTH_TOKEN`) |
 | `agent` | Accept the run on `agentId`/`sessionKey`, get `runId` |
-| `chat` events (subscribed) | Wait for the main session's final synthesized assistant message (`sessionKey=agent:main:main`, `state=final`) — arrives under a resumed runId after the spawn tree finishes |
-| `agent.wait` (raced, error-only) | Resolves at the first `sessions_yield` (NOT spawn-tree completion); used only to surface early errors |
+| `chat` events (subscribed) | Wait for the main session's final synthesized assistant message (`sessionKey=agent:main:main`, `state=final`) — in tri-node mode arrives under a resumed runId after the spawn tree finishes; in single-agent mode (#9) arrives on the same runId when `main` completes |
+| `agent.wait` (raced, error-only) | Resolves at the first `sessions_yield` (NOT spawn-tree completion); used only to surface early errors. In single-agent mode there is no `sessions_yield`, so it resolves at run completion — still raced only for early-error detection |
 
 The WebSocket connection inherits the container's environment, and `OPENCLAW_STATE_DIR` points the in-container Gateway at the correct isolated agent's state directory. The `agentId` (`main`) and `sessionKey` (`main`) target the root agent registered in that state directory.
 
@@ -509,13 +518,25 @@ Instructs the agent that:
 
 #### `IDENTITY.md`
 
-Defines the agent's **domain persona** and enforces the delegation pattern:
-- **Researcher:** Lead Researcher persona. Delegates research tasks through the sub-agent loop.
-- **Coder:** Lead Coder persona. Delegates coding tasks through the sub-agent loop.
+Defines the agent's **domain persona**. In single-agent mode (#9):
+- **Researcher:** Does the research work itself using full tool access. When a task requires code, `main` curls the Coder's bridge directly over A2A (see "A2A Code Delegation" below) and folds the Coder's `result.output` into its final deliverable. It never writes code itself.
+- **Coder:** Does the coding work itself using full tool access. It receives a code-generation spec (from the Researcher over A2A, or a direct request from an external client), produces the code, and returns it as a structured JSON deliverable. It is a leaf node — it never calls back to the Researcher.
 
-The root agent **does not execute tasks itself**. Its sole function is to receive the task instruction from the bridge, delegate it through the standardized sub-agent loop, and return the synthesized result.
+> **Tri-node (PARKED):** The original `IDENTITY.md` described `main` as an orchestrator-only router that delegates through the planner → executor → reviewer loop. That prompt is preserved as `IDENTITY.tri-node.md` (see "The Standardized Sub-Agent Loop" below for the parked design and revival path).
 
-### The Standardized Sub-Agent Loop
+### The Standardized Sub-Agent Loop (PARKED — future design pending an OpenClaw fix)
+
+> ⚠️ **Status — PARKED (#9, #11).** The tri-node sub-agent loop (planner → executor → reviewer) is the **intended architecture**, preserved here as the future design. It is **not currently active**. It is parked because of an OpenClaw platform limitation: OpenClaw sub-agents cannot reliably drive cross-agent A2A calls, and the prompt-level delegation directive (Researcher's reviewer → Coder) was overridden by the model's task-completion instinct — the reviewer wrote the code itself and the Coder's bridge never received a delegation (proven across 4 end-to-end tests, 2026-08-01). See §11 for the constraint row.
+>
+> **Current mode — single-agent-per-container:** `main` does the task itself using full tool access. On the Researcher, `main` curls the Coder's bridge directly when a task needs code (see "A2A Code Delegation" below). There is no `sessions_spawn` / `sessions_yield` and no spawn tree.
+>
+> **Revival path (when the OpenClaw fix lands):**
+> 1. In each agent's `openclaw.json` (JSON5), **uncomment** the `planner` / `executor` / `reviewer` entries in `agents.list`, and **uncomment** `main`'s `deny` list + `alsoAllow` (`sessions_spawn`, `sessions_yield`, `subagents`) so `main` becomes an orchestrator-only router again.
+> 2. **Swap** `IDENTITY.tri-node.md` back to `IDENTITY.md` (the single-agent `IDENTITY.md` is preserved in git history / on the branch).
+> 3. The sub-agent directories (`agents/{researcher,coder}/.openclaw/agents/{planner,executor,reviewer}/` and `workspace/{planner,executor,reviewer}/`) are **untouched** — no re-creation needed.
+> 4. **Baseline:** git tag `v0.1.0` (commit `5e428c0`) is the revival baseline; the tri-node artifacts were preserved in commit `717b2cd` (issue #9). See issues #6 (umbrella), #7 (plugin/extend OpenClaw), #8 (fork/build a new runtime) for the structural-enforcement options under evaluation.
+>
+> The description below is the **parked design** — the architecture the bridge was built to handle and will apply again once revived.
 
 Every root agent contains the **exact same tri-node architecture** — three sub-agents registered in the agent's `.openclaw` directory. The architecture is identical across all agents; only the `IDENTITY.md` customization (Research vs. Coding domain) differs.
 
@@ -558,14 +579,18 @@ Every root agent contains the **exact same tri-node architecture** — three sub
 | **Quality gates** | Verifies factual claims, checks code correctness, ensures JSON compliance, strips any conversational filler. |
 | **Output** | The final, pristine deliverable — synthesized and formatted for JSON-RPC response back to the network. |
 
-> **Researcher reviewer — A2A code delegation (prompt-based, pending enforcement):**
-> The Researcher's `reviewer/IDENTITY.md` carries an **"A2A Code Delegation"** directive: when the task requires generating or modifying code, the reviewer is instructed to POST a precise code spec to the Coder agent at `http://coder:3000/a2a/tasks` (JSON-RPC) and fold the Coder's `result.output` into its synthesized deliverable, rather than writing the code itself. The delegation is **one-way** (Coder never calls back to Researcher) and **code-only** (research/synthesis stays the reviewer's job).
+> **Researcher reviewer — A2A code delegation (PARKED with the tri-node design):**
+> In the parked tri-node design, the Researcher's `reviewer/IDENTITY.md` carries an **"A2A Code Delegation"** directive: when the task requires generating or modifying code, the reviewer is instructed to POST a precise code spec to the Coder agent at `http://coder:3000/a2a/tasks` (JSON-RPC) and fold the Coder's `result.output` into its synthesized deliverable, rather than writing the code itself. The delegation is **one-way** (Coder never calls back to Researcher) and **code-only** (research/synthesis stays the reviewer's job).
 >
-> ⚠️ **Status — pending enforcement (agent-platform limitation):** End-to-end testing (2026-08-01) showed this directive does **not** fire in practice. The reviewer is a capable model with `tools.profile: "full"` (exec/curl access), and its task-completion instinct overrides the prompt-level "FORBIDDEN FROM WRITING CODE" rule — it generates the code itself and Coder's bridge never receives a delegation. This is tracked as an **agent-platform limitation**, not a model limitation (other non-OpenClaw agents perform sub-agent delegation reliably). See §11 and issues #6/#7/#8 for the structural-enforcement options under evaluation.
+> ⚠️ **Status — PARKED (agent-platform limitation, #9/#11):** End-to-end testing (2026-08-01) showed this directive does **not** fire in practice. The reviewer is a capable model with `tools.profile: "full"` (exec/curl access), and its task-completion instinct overrides the prompt-level "FORBIDDEN FROM WRITING CODE" rule — it generates the code itself and Coder's bridge never receives a delegation. This is tracked as an **agent-platform limitation**, not a model limitation (other non-OpenClaw agents perform sub-agent delegation reliably). See §11 and issues #6/#7/#8 for the structural-enforcement options under evaluation.
+>
+> ✅ **Single-agent mode — A2A delegation DOES fire (#10):** In the current single-agent mode, the Researcher's `main` (not the reviewer) curls the Coder's bridge directly when a task needs code. Live testing (2026-08-11) confirmed the Coder receives the payload and generates the code — the cross-agent A2A call works end-to-end. The residual issues are output-formatting hygiene (narration prefixes, markdown fences), not delegation failure. See §11.
 
-### Orchestrator Guardrails (Researcher `main`)
+### Orchestrator Guardrails (Researcher `main`) — PARKED with the tri-node design
 
-The Researcher root agent (`main/IDENTITY.md`) carries three guardrails that fix recurring early-termination failure modes discovered during end-to-end testing. Without them, the orchestrator tended to end its turn mid-loop, capturing narration as the final answer and orphaning the reviewer.
+> ⚠️ **Status — PARKED (#9, #11).** These guardrails apply to the tri-node orchestrator prompt (`IDENTITY.tri-node.md`), which is **not currently active**. In single-agent mode, `main` does the task itself — there is no spawn loop to terminate early, so these failure modes do not arise. The guardrails are preserved here with the parked design and will apply again when the tri-node is revived (see the revival path above).
+
+The Researcher root agent (`main/IDENTITY.tri-node.md`) carries three guardrails that fix recurring early-termination failure modes discovered during end-to-end testing. Without them, the orchestrator tended to end its turn mid-loop, capturing narration as the final answer and orphaning the reviewer.
 
 | Guardrail | Failure mode it fixes |
 |----------|----------------------|
@@ -573,9 +598,9 @@ The Researcher root agent (`main/IDENTITY.md`) carries three guardrails that fix
 | **STEP 5→6 ATOMIC** | `sessions_spawn(reviewer)` and `sessions_yield` must happen back-to-back in the same turn (fixes the reviewer being orphaned when the orchestrator ends after spawning it). |
 | **EXECUTOR ERROR / EMPTY-OUTPUT RULE** | On executor error or empty output, do not re-spawn the executor; proceed immediately to the reviewer with the blueprint plus a factual failure note. There is no "STEP 4b: retry executor" step. |
 
-### Domain Customization
+### Domain Customization (PARKED with the tri-node design)
 
-The tri-node architecture is identical, but each agent's `IDENTITY.md` customizes the domain:
+The tri-node architecture is identical, but each agent's `IDENTITY.md` customizes the domain. In single-agent mode, the same domain split applies to `main` directly (Researcher researches, Coder codes) — see the `IDENTITY.md` files for the single-agent personas.
 
 | Agent | Planner Focus | Executor Tools | Reviewer Focus |
 |-------|--------------|----------------|----------------|
@@ -596,16 +621,16 @@ The tri-node architecture is identical, but each agent's `IDENTITY.md` customize
 
 ### Agent Sub-Nodes (per agent)
 
-Each agent container (`researcher`, `coder`) contains these sub-agents in its `.openclaw` state directory. Both agents now share the **same tri-node architecture and tool access** (Phase 1 brought Coder to parity with Researcher):
+Each agent container (`researcher`, `coder`) contains these sub-agents in its `.openclaw` state directory. In single-agent mode (#9), only `main` is **active**; the tri-node sub-agents are **commented out** in `openclaw.json` (JSON5) and preserved for the revival path (see §8). The table below reflects the **current** state:
 
 | Sub-Agent | Node Type | Tools | Function |
 |-----------|-----------|-------|----------|
-| `main` | Root | exec/web_fetch **denied** | Orchestrator-only router; receives A2A bridge payloads, delegates to sub-agents via `sessions_spawn` then `sessions_yield` |
-| `planner` | Sub-agent | `tools.profile: "full"` | Analyzes task, produces sequential blueprint (does not execute) |
-| `executor` | Sub-agent | `tools.profile: "full"` (no deny list) | Executes planner's blueprint using system tools (exec, curl, web_fetch, file I/O) |
-| `reviewer` | Sub-agent | `tools.profile: "full"` (no deny list) | Audits output, synthesizes final deliverable; on the Researcher, carries the (pending-enforcement) A2A code-delegation directive |
+| `main` | Root (active) | `tools.profile: "full"` (no deny list) | **Working agent** — receives A2A bridge payloads and does the task itself using full tool access (exec, web_fetch, read/write/edit). On the Researcher, curls the Coder's bridge directly when a task needs code (§8). |
+| `planner` | Sub-agent (PARKED) | `tools.profile: "full"` | Commented out in `openclaw.json`. Would analyze task, produce sequential blueprint (does not execute). |
+| `executor` | Sub-agent (PARKED) | `tools.profile: "full"` (no deny list) | Commented out in `openclaw.json`. Would execute planner's blueprint using system tools (exec, curl, web_fetch, file I/O). |
+| `reviewer` | Sub-agent (PARKED) | `tools.profile: "full"` (no deny list) | Commented out in `openclaw.json`. Would audit output, synthesize final deliverable; on the Researcher, carries the (parked) A2A code-delegation directive. |
 
-> **Coder parity (Phase 1):** Coder's `main` is now an orchestrator-only router matching Researcher's pattern (exec/web_fetch denied on `main`); all Coder sub-agents have `tools.profile: "full"`. The planner `id` is lowercase (`planner`) to match the `sessions_spawn` casing requirement.
+> **Coder parity (Phase 1):** Both agents share the same single-agent architecture: `main` is the working agent with full tool access; the tri-node sub-agents are commented out identically. The planner `id` is lowercase (`planner`) to match the `sessions_spawn` casing requirement (relevant when the tri-node is revived).
 
 ---
 
@@ -717,11 +742,11 @@ ls -la agents/coder/.openclaw/
 | **Apicurio in-memory storage** | Agent registrations lost on registry restart | 5-second delayed re-registration on bridge startup handles this automatically |
 | **No host port exposure** | Cannot `curl` agents directly from macOS host | Use `podman exec` to curl from within the network, or add port mappings to compose |
 | **Headless-only output** | Any conversational text corrupts JSON-RPC responses | Enforced via `USER.md` prompt; reviewer sub-agent strips non-JSON output |
-| **`openclaw agent` CLI is fire-and-forget** | The CLI returns `{ runId, acceptedAt }` at acceptance, NOT completion, so sub-agent responses (planner/executor/reviewer) are produced after the CLI exits | Bridge speaks the Gateway WS protocol (`connect` → `agent` → subscribe to `chat` events) instead of shelling out to the CLI; it waits for the main session's final synthesized `chat` event (arrives under a resumed runId after the spawn tree finishes). `agent.wait` is raced only for early error detection — it resolves at the first `sessions_yield`, NOT at spawn-tree completion |
+| **`openclaw agent` CLI is fire-and-forget** | The CLI returns `{ runId, acceptedAt }` at acceptance, NOT completion, so sub-agent responses (planner/executor/reviewer) are produced after the CLI exits | Bridge speaks the Gateway WS protocol (`connect` → `agent` → subscribe to `chat` events) instead of shelling out to the CLI; it waits for the main session's final synthesized `chat` event (arrives under a resumed runId after the spawn tree finishes). `agent.wait` is raced only for early error detection — it resolves at the first `sessions_yield`, NOT at spawn-tree completion. **In single-agent mode (#9)** there is no `sessions_yield`, so `agent.wait` resolves at run completion and the final `chat` event arrives on the same runId; the bridge still treats the `chat` event as the source of truth |
 | **`sessions.history` requires `operator.admin`** | The device is approved for `operator.write` only; `sessions.history` triggers `PAIRING_REQUIRED` | The bridge reads the result from the `chat` event stream instead of calling `sessions.history` |
 | **Sub-agent id casing** | `sessions_spawn` targets sub-agents by exact `id`; a mismatched case (e.g. `Executor` vs `executor`) silently fails to resolve | All sub-agent `id` values in `openclaw.json` are lowercase and match the IDs referenced in `IDENTITY.md`/`AGENTS.md` |
-| **Prompt-only A2A delegation does not fire** | The Researcher reviewer's "A2A Code Delegation" directive (POST code spec to Coder, don't write code yourself) is overridden by the model's task-completion instinct — the reviewer writes the code itself and Coder's bridge never receives a delegation. Proven across 4 end-to-end tests (2026-08-01) with both reviewer and executor as the delegation point. | **Pending structural enforcement.** The directive is in place as the intended design; making it actually fire is tracked in issues #6 (live with the limitation), #7 (plugin/extend OpenClaw to enforce deterministically), and #8 (fork/build a new runtime with first-class sub-agent delegation). The orchestrator guardrails (TRUNCATED-OUTPUT, STEP 5→6 ATOMIC, EXECUTOR ERROR) are in place and working. |
-| **Orchestrator early-termination (mitigated, not fully solved)** | The Researcher `main` orchestrator can end its turn mid-loop, capturing narration as the final answer and orphaning the reviewer. Triggered by truncated executor output, the step 5→6 gap, or executor errors. | Three guardrails in `main/IDENTITY.md` (TRUNCATED-OUTPUT RULE, STEP 5→6 ATOMIC, EXECUTOR ERROR / EMPTY-OUTPUT RULE) fix the known trigger paths. Test 5 showed a residual truncation-triggered early-termination still possible; full reliability likely requires the same structural enforcement as the delegation issue above. |
+| **Sub-agent + A2A cross-agent calls do not work in OpenClaw** | OpenClaw sub-agents cannot reliably drive cross-agent A2A calls, and the prompt-level delegation directive (Researcher's reviewer → Coder) is overridden by the model's task-completion instinct — the reviewer writes the code itself and Coder's bridge never receives a delegation. Proven across 4 end-to-end tests (2026-08-01) with both reviewer and executor as the delegation point. | **Single-agent mode (#9).** The tri-node design is parked pending an OpenClaw fix; artifacts are preserved via JSON5 comments in `openclaw.json`, `IDENTITY.tri-node.md`, and git tag `v0.1.0` (commit `5e428c0`). In single-agent mode, the Researcher's `main` curls the Coder's bridge directly when a task needs code — cross-agent A2A works end-to-end (live-tested 2026-08-11, #10). Making the tri-node fire deterministically is tracked in issues #6 (umbrella), #7 (plugin/extend OpenClaw), and #8 (fork/build a new runtime). |
+| **Orchestrator early-termination (moot in single-agent mode)** | The Researcher `main` orchestrator can end its turn mid-loop, capturing narration as the final answer and orphaning the reviewer. Triggered by truncated executor output, the step 5→6 gap, or executor errors. | **Moot in single-agent mode (#9):** `main` does the task itself — there is no spawn loop to terminate early, so this failure mode does not arise. The three guardrails (TRUNCATED-OUTPUT RULE, STEP 5→6 ATOMIC, EXECUTOR ERROR / EMPTY-OUTPUT RULE) are preserved in `IDENTITY.tri-node.md` and will apply again when the tri-node is revived. Full reliability at that point likely requires the same structural enforcement as the sub-agent/A2A issue above. |
 | **VS Code agent terminal cannot reach the VM's local subnet** | After a VS Code upgrade, the VS Code integrated terminal (and any process it spawns, including system binaries like `/usr/bin/ssh`) cannot reach hosts on the VM's local subnet (`192.168.64.0/24`) or the LAN (`192.168.100.0/24`). Symptom: `No route to host`. Internet and tailnet IPs still work. The block is at the system network-extension layer, applies to the whole VS Code process session regardless of binary, and is NOT caused by Tailscale, pf, the macOS Application Firewall, TCC Local Network privacy (VS Code is granted), the VS Code agent sandbox (it's off), or the Electron sandbox. An interactive Terminal.app shell on the same Mac CAN reach the VM. | **tmux bridge.** A tmux server started from an interactive Terminal.app shell runs in a working network context. The agent sends commands into the tmux session via `tmux send-keys` and reads captured output from `/tmp` files. The helper script `vm-bridge.sh` (see §10) automates this. The workspace is VirtioFS-mounted at `/mnt/workspace` on the VM, so scripts written on the macOS host are immediately executable on the VM without copying. |
 
 ---
