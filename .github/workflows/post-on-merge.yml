@@ -81,7 +81,7 @@ jobs:
         with:
           prompt-file: .github/prompts/linkedin-post.prompt.yml
           system-prompt-file: .github/prompts/linkedin-post.system.md
-          model: claude-haiku-4.5
+          model: gpt-5-mini
           # Only YAML-safe scalars go in `input:`. The PR title/body and JSON
           # arrays contain colons, `#`, and other chars that break YAML parsing
           # (the v3 failure on PR #14's merge: "bad indentation of a mapping
