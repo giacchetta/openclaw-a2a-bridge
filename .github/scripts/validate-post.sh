@@ -33,21 +33,43 @@ fi
 # the first frontmatter block (--- ... ---) and everything after it.
 CONTENT="$(cat "$RESPONSE_FILE")"
 
-# Strip a leading ```markdown / ``` fence if present.
-CONTENT="$(printf '%s\n' "$CONTENT" | sed -E '1{/^```(markdown|md)?$/d}')"
-# Strip a trailing ``` fence if present (last non-empty line).
-CONTENT="$(printf '%s\n' "$CONTENT" | sed -E '${/^```$/d}')"
+# Normalize CRLF -> LF. The Copilot CLI / model can emit Windows line endings,
+# which breaks `grep -qx '---'` (the line becomes `---\r`) and YAML parsing.
+CONTENT="$(printf '%s\n' "$CONTENT" | tr -d '\r')"
 
-if ! printf '%s\n' "$CONTENT" | head -1 | grep -qx '---'; then
+# Strip a leading ```markdown / ``` fence if present (model often wraps output),
+# and a trailing ``` fence. Use awk (not sed) for portability across GNU/BSD.
+# Tolerate trailing whitespace on the fence lines.
+CONTENT="$(printf '%s\n' "$CONTENT" | awk '
+  BEGIN { strip_lead=1 }
+  strip_lead && /^```(markdown|md)?[[:space:]]*$/ { next }
+  { strip_lead=0; print }
+' | awk '
+  { lines[NR]=$0 }
+  END {
+    # Drop trailing blank lines, then a trailing ``` fence if present.
+    last=NR
+    while (last>0 && lines[last] ~ /^[[:space:]]*$/) last--
+    if (last>0 && lines[last] ~ /^```[[:space:]]*$/) last--
+    for (i=1;i<=last;i++) print lines[i]
+  }
+')"
+
+# Strip leading blank/whitespace-only lines before the frontmatter fence
+# (preserves blank lines in the body).
+CONTENT="$(printf '%s\n' "$CONTENT" | awk 'NF { p=1 } p { print }')"
+
+if ! printf '%s\n' "$CONTENT" | head -1 | grep -qx -e '---'; then
   echo "::error::Post does not start with frontmatter fence '---'."
   echo "::error::First 5 lines:"
   printf '%s\n' "$CONTENT" | head -5 | sed 's/^/  /'
   exit 1
 fi
 
-# Split frontmatter and body.
-FM="$(printf '%s\n' "$CONTENT" | awk 'NR==1{next} /^---$/{exit} {print}')"
-BODY="$(printf '%s\n' "$CONTENT" | awk 'found{print} /^---$/{if(NR>1){found=1}}')"
+# Split frontmatter and body. Fence lines may carry trailing whitespace
+# (already CRLF-normalized above), so match `---` followed by optional spaces.
+FM="$(printf '%s\n' "$CONTENT" | awk 'NR==1{next} /^---[[:space:]]*$/{exit} {print}')"
+BODY="$(printf '%s\n' "$CONTENT" | awk 'found{print} /^---[[:space:]]*$/{if(NR>1){found=1}}')"
 
 if [ -z "$FM" ]; then
   echo "::error::Frontmatter is empty (no closing '---' fence found)."
@@ -66,16 +88,26 @@ if [ "$BODY_LEN" -lt 80 ]; then
 fi
 
 # Parse frontmatter fields. Use python3 (preinstalled on ubuntu-latest) for
-# safe YAML parsing rather than fragile grep/sed.
-read -r SLUG TITLE DATE AUTHORS_TAGS_OK <<< "$(python3 - <<'PY' "$FM"
+# safe YAML parsing rather than fragile grep/sed. The frontmatter text is
+# passed as argv[1] (the heredoc supplies the script on stdin, so sys.stdin
+# is already consumed — reading from it returns "" and yields None).
+#
+# Fields are delimited by \x1f (ASCII unit separator) so a title containing
+# spaces (or even newlines) survives intact into the bash variables. NUL
+# can't be used because bash truncates variables at the first NUL byte.
+FM_PARSE_OUT="$(python3 - "$FM" <<'PY'
 import sys, yaml, re
-fm = yaml.safe_load(sys.stdin.read())
+SEP = "\x1f"
+fm = yaml.safe_load(sys.argv[1])
+if not isinstance(fm, dict):
+    sys.stdout.write("ERRORS:frontmatter did not parse as a YAML mapping" + SEP)
+    sys.exit(0)
 errors = []
 for k in ("slug", "title", "date", "authors", "tags"):
     if k not in fm:
         errors.append(f"missing key: {k}")
 if errors:
-    print("ERRORS:" + "|".join(errors))
+    sys.stdout.write("ERRORS:" + "|".join(errors) + SEP)
     sys.exit(0)
 slug = str(fm["slug"])
 title = str(fm["title"])
@@ -89,16 +121,25 @@ if not authors_ok:
 if not tags_ok:
     errors.append("tags must be a non-empty list")
 if errors:
-    print("ERRORS:" + "|".join(errors))
+    sys.stdout.write("ERRORS:" + "|".join(errors) + SEP)
     sys.exit(0)
-print(f"{slug}\t{title}\t{date}\t{authors_ok and tags_ok}")
+sys.stdout.write(f"{slug}{SEP}{title}{SEP}{date}{SEP}{authors_ok and tags_ok}{SEP}")
 PY
 )"
 
+# Split on the unit separator. The first field may be an ERRORS: marker.
+SLUG="${FM_PARSE_OUT%%$'\x1f'*}"
 if [[ "$SLUG" == ERRORS:* ]]; then
   echo "::error::Frontmatter validation failed: ${SLUG#ERRORS:}"
   exit 1
 fi
+# Drop the first field, then extract each subsequent field.
+REST="${FM_PARSE_OUT#*$'\x1f'}"
+TITLE="${REST%%$'\x1f'*}"
+REST="${REST#*$'\x1f'}"
+DATE="${REST%%$'\x1f'*}"
+REST="${REST#*$'\x1f'}"
+AUTHORS_TAGS_OK="${REST%%$'\x1f'*}"
 
 if [ -z "$TITLE" ] || [ -z "$SLUG" ]; then
   echo "::error::Could not extract slug/title from frontmatter."

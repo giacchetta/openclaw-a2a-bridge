@@ -36,8 +36,6 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      ACTIONS_STEP_DEBUG: true
     steps:
       - name: Checkout this repo
         uses: actions/checkout@v6
@@ -95,7 +93,6 @@ jobs:
             feed: feed.json
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.GC_COPILOT_TOKEN }}
-          ACTIONS_STEP_DEBUG: true
 
       - name: Validate generated post
         id: post
