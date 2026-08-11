@@ -56,4 +56,4 @@ messages:
       5. 150–250 words in the body. One closing one-liner.
       6. Output ONLY the Markdown file. No commentary.
 
-model: gpt-5-mini
+model: auto
