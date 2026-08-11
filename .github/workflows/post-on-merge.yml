@@ -75,7 +75,7 @@ jobs:
 
       - name: Run AI inference
         id: ai
-        uses: actions/ai-inference@v1
+        uses: actions/ai-inference@v3
         with:
           prompt-file: .github/prompts/linkedin-post.prompt.yml
           system-prompt-file: .github/prompts/linkedin-post.system.md
@@ -91,7 +91,7 @@ jobs:
             diffstat: ${{ fromJSON(steps.gather.outputs.feed).diffstat }}
             files_changed: ${{ fromJSON(steps.gather.outputs.feed).files_changed }}
         env:
-          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_PAT }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.GC_COPILOT_TOKEN }}
 
       - name: Validate generated post
         id: post
@@ -103,20 +103,38 @@ jobs:
           set -euo pipefail
           bash .github/scripts/validate-post.sh
 
-      - name: Push post to personal site
+      # Push to the live personal site is disabled until the generated posts are
+      # reviewed. Uncomment (and set the POSTS_PAT secret) once the output quality
+      # is verified. The artifact + log steps below let you inspect the post
+      # without publishing anything.
+      # - name: Push post to personal site
+      #   env:
+      #     POSTS_PAT: ${{ secrets.GC_TOKEN }}
+      #     POST_PATH: ${{ steps.post.outputs.path }}
+      #     POST_FILENAME: ${{ steps.post.outputs.filename }}
+      #     POST_TITLE: ${{ steps.post.outputs.title }}
+      #     PR_NUMBER: ${{ steps.pr.outputs.number }}
+      #   run: |
+      #     set -euo pipefail
+      #     bash .github/scripts/push-post.sh
+
+      - name: Print generated post to log
+        if: always()
         env:
-          POSTS_PAT: ${{ secrets.POSTS_PAT }}
-          POST_PATH: ${{ steps.post.outputs.path }}
-          POST_FILENAME: ${{ steps.post.outputs.filename }}
-          POST_TITLE: ${{ steps.post.outputs.title }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          RESPONSE_FILE: ${{ steps.ai.outputs.response-file }}
         run: |
-          set -euo pipefail
-          bash .github/scripts/push-post.sh
+          echo "::group::Generated post (raw model response)"
+          if [ -n "$RESPONSE_FILE" ] && [ -f "$RESPONSE_FILE" ]; then
+            cat "$RESPONSE_FILE"
+          else
+            echo "(no response file — ai-inference step did not produce output)"
+          fi
+          echo "::endgroup::"
 
       - name: Upload post artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: post-${{ steps.pr.outputs.number }}
           path: ${{ steps.ai.outputs.response-file }}
-          if-no-files-found: error
+          if-no-files-found: warn
