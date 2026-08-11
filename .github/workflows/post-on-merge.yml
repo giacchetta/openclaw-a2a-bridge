@@ -95,15 +95,21 @@ jobs:
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.GC_COPILOT_TOKEN }}
 
-      # - name: Validate generated post
-      #   id: post
-      #   env:
-      #     RESPONSE_FILE: ${{ steps.ai.outputs.response-file }}
-      #     PR_NUMBER: ${{ steps.pr.outputs.number }}
-      #     MERGE_DATE: ${{ fromJSON(steps.gather.outputs.feed).merge_date }}
-      #   run: |
-      #     set -euo pipefail
-      #     bash .github/scripts/validate-post.sh
+      # Lenient extraction: strip code fences + CRLF, parse the frontmatter for
+      # slug + title, write the cleaned content to a stable path. Replaces the
+      # strict validate-post.sh gates (body length, kebab-case, non-empty
+      # fields) which rejected stray chars the model occasionally adds and
+      # blocked the whole pipeline. Only fails when the frontmatter is truly
+      # unparseable (no slug/title to derive a filename from).
+      - name: Prepare generated post
+        id: post
+        env:
+          RESPONSE_FILE: ${{ steps.ai.outputs.response-file }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          MERGE_DATE: ${{ fromJSON(steps.gather.outputs.feed).merge_date }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/prepare-post.sh
 
       # Push the post to the personal site via a short-lived branch + pull
       # request (NOT a direct push to main). The repo's CODEOWNER reviews and

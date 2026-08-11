@@ -18,7 +18,7 @@ post from a calibrated system prompt.
 │   └── post-on-merge.yml        # trigger: pull_request closed + merged; workflow_dispatch backfill
 ├── scripts/
 │   ├── gather-feed.sh          # gh + jq → feed.json (PR + linked issues + commits + diffstat)
-│   ├── validate-post.sh        # frontmatter + body validation; extracts slug/title
+│   ├── prepare-post.sh        # lenient frontmatter extraction; strips fences/CRLF, derives slug/title
 │   └── push-post.sh            # clone personal repo, write post/, commit, push (idempotent)
 └── prompts/
     ├── linkedin-post.system.md # voice + hard rules (calibrated against 2 existing posts)
