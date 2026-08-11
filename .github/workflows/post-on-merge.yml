@@ -95,16 +95,18 @@ jobs:
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.GC_COPILOT_TOKEN }}
 
-      # Lenient extraction: strip code fences + CRLF, parse the frontmatter for
-      # slug + title, write the cleaned content to a stable path. Replaces the
-      # strict validate-post.sh gates (body length, kebab-case, non-empty
-      # fields) which rejected stray chars the model occasionally adds and
-      # blocked the whole pipeline. Only fails when the frontmatter is truly
-      # unparseable (no slug/title to derive a filename from).
+      # Clean the AI response (strip CRLF + leading/trailing code fences) and
+      # derive the post's path/filename/title from the gather step's PR_TITLE +
+      # MERGE_DATE — NOT by parsing the model's frontmatter. The model
+      # occasionally injects code fences inside the frontmatter that crash
+      # yaml.safe_load, so we stopped parsing the post for routing metadata
+      # entirely. The frontmatter is left untouched; the CODEOWNER reviews the
+      # PR before merge.
       - name: Prepare generated post
         id: post
         env:
           RESPONSE_FILE: ${{ steps.ai.outputs.response-file }}
+          PR_TITLE: ${{ fromJSON(steps.gather.outputs.feed).pr_title }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           MERGE_DATE: ${{ fromJSON(steps.gather.outputs.feed).merge_date }}
         run: |

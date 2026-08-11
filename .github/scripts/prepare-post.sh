@@ -1,27 +1,34 @@
 #!/usr/bin/env bash
-# prepare-post.sh — lenient extraction of the AI-generated post.
+# prepare-post.sh — clean the AI-generated post and derive its target path.
 #
-# Replaces the strict validate-post.sh gates (body length, kebab-case, non-empty
-# fields) with a permissive pass: strip code fences + CRLF, parse the frontmatter
-# for slug + title, and write the cleaned content to a stable path. Only fails
-# when the frontmatter is truly unparseable (no slug/title to derive a filename
-# from). The strict gates were disabled because the model occasionally adds
-# stray characters the gates rejected, blocking the whole pipeline.
+# NO YAML PARSING. The frontmatter is generated from a template we control, so
+# routing metadata (filename, title) is derived deterministically from the
+# gather step's PR_TITLE + MERGE_DATE — never read back out of the model
+# response. The model occasionally injects code fences inside/around the
+# frontmatter that crash yaml.safe_load (ScannerError on '`'); parsing the
+# post for routing metadata was the fragile part, so we stopped doing it.
+#
+# The AI response is only cleaned textually: CRLF -> LF, leading/trailing code
+# fences stripped, leading blank lines removed. The frontmatter is left
+# untouched (the CODEOWNER reviews the PR before merge and catches any model
+# formatting drift at build time on the personal repo).
 #
 # Inputs (env):
 #   RESPONSE_FILE  — path to the model response (from actions/ai-inference output)
-#   PR_NUMBER      — the PR number (for idempotency metadata)
-#   MERGE_DATE     — YYYY-MM-DD (the post's filename date)
+#   PR_TITLE       — the PR title (from gather; slugified for the filename + commit msg)
+#   PR_NUMBER      — the PR number (for idempotency metadata + slug fallback)
+#   MERGE_DATE     — YYYY-MM-DD (the post's filename date, from gather)
 #
 # Outputs (GITHUB_ENV-style, written to $GITHUB_OUTPUT):
 #   path          — target path in the personal repo: post/<YYYY-MM-DD>-<slug>.md
 #   filename      — <YYYY-MM-DD>-<slug>.md
-#   title         — frontmatter title (for the commit message)
-#   slug          — frontmatter slug
+#   title         — PR title (for the commit message)
+#   slug          — slugified PR title
 #   cleaned_file  — stable path to the cleaned content (frontmatter + body)
 set -euo pipefail
 
 : "${RESPONSE_FILE:?RESPONSE_FILE env is required}"
+: "${PR_TITLE:?PR_TITLE env is required}"
 : "${PR_NUMBER:?PR_NUMBER env is required}"
 : "${MERGE_DATE:?MERGE_DATE env is required}"
 
@@ -58,62 +65,19 @@ CONTENT="$(printf '%s\n' "$CONTENT" | awk '
 # (preserves blank lines in the body).
 CONTENT="$(printf '%s\n' "$CONTENT" | awk 'NF { p=1 } p { print }')"
 
-if ! printf '%s\n' "$CONTENT" | head -1 | grep -qx -e '---'; then
-  echo "::error::Post does not start with frontmatter fence '---'."
-  echo "::error::First 5 lines:"
-  printf '%s\n' "$CONTENT" | head -5 | sed 's/^/  /'
-  exit 1
+# Derive the slug from the PR title (deterministic, from gather — never parsed
+# back out of the model response). Lowercase, replace every non-alphanumeric
+# run with a single '-', strip leading/trailing '-'. Fall back to pr-<N> if the
+# title had no alphanumerics at all.
+SLUG="$(printf '%s' "$PR_TITLE" \
+  | tr '[:upper:]' '[:lower:]' \
+  | tr -c '[:alnum:]' '-' \
+  | sed 's/--*/-/g; s/^-*//; s/-*$//')"
+if [ -z "$SLUG" ]; then
+  SLUG="pr-${PR_NUMBER}"
 fi
 
-# Split frontmatter and body. Fence lines may carry trailing whitespace
-# (already CRLF-normalized above), so match `---` followed by optional spaces.
-FM="$(printf '%s\n' "$CONTENT" | awk 'NR==1{next} /^---[[:space:]]*$/{exit} {print}')"
-BODY="$(printf '%s\n' "$CONTENT" | awk 'found{print} /^---[[:space:]]*$/{if(NR>1){found=1}}')"
-
-if [ -z "$FM" ]; then
-  echo "::error::Frontmatter is empty (no closing '---' fence found)."
-  exit 1
-fi
-
-# Parse frontmatter fields with python3 (preinstalled on ubuntu-latest) for
-# safe YAML parsing. Fields are delimited by \x1f (ASCII unit separator) so a
-# title containing spaces (or even newlines) survives intact into bash vars.
-# NUL can't be used because bash truncates variables at the first NUL byte.
-FM_PARSE_OUT="$(python3 - "$FM" <<'PY'
-import sys, yaml, re
-SEP = "\x1f"
-fm = yaml.safe_load(sys.argv[1])
-if not isinstance(fm, dict):
-    sys.stdout.write("ERRORS:frontmatter did not parse as a YAML mapping" + SEP)
-    sys.exit(0)
-slug = str(fm.get("slug", "") or "")
-title = str(fm.get("title", "") or "")
-if not slug:
-    sys.stdout.write("ERRORS:missing slug" + SEP)
-    sys.exit(0)
-if not title:
-    sys.stdout.write("ERRORS:missing title" + SEP)
-    sys.exit(0)
-# Lenient: do NOT enforce kebab-case on the slug. If it contains spaces or
-# uppercase chars, normalize to lowercase kebab-case so the filename is safe.
-slug = slug.strip().lower()
-slug = re.sub(r"[^a-z0-9]+", "-", slug)
-slug = slug.strip("-")
-if not slug:
-    sys.stdout.write("ERRORS:slug normalized to empty" + SEP)
-    sys.exit(0)
-sys.stdout.write(f"{slug}{SEP}{title}{SEP}")
-PY
-)"
-
-SLUG="${FM_PARSE_OUT%%$'\x1f'*}"
-if [[ "$SLUG" == ERRORS:* ]]; then
-  echo "::error::Frontmatter extraction failed: ${SLUG#ERRORS:}"
-  exit 1
-fi
-REST="${FM_PARSE_OUT#*$'\x1f'}"
-TITLE="${REST%%$'\x1f'*}"
-
+TITLE="$PR_TITLE"
 FILENAME="${MERGE_DATE}-${SLUG}.md"
 POST_PATH="post/${FILENAME}"
 
