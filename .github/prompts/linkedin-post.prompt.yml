@@ -1,6 +1,9 @@
 # User-message template for the LinkedIn post generator.
-# Consumed by actions/ai-inference@v1 via `prompt-file:` + `input:`.
-# Variables ({{var}}) are filled from the `input:` map in the workflow.
+# Consumed by actions/ai-inference@v3 via `prompt-file:` + `input:` + `file_input:`.
+# - `input:` provides YAML-safe scalars ({{repo}}, {{pr_number}}, {{merge_date}}).
+# - `file_input:` injects feed.json as a single {{feed}} variable (raw JSON).
+#   The PR title/body and JSON arrays are NOT inlined in `input:` because they
+#   contain colons, `#`, and other chars that break YAML parsing.
 
 messages:
   - role: system
@@ -15,39 +18,35 @@ messages:
       be a complete Markdown file starting with frontmatter and ending at the
       end of the body. No prose before or after the file.
 
-      ## Feed
+      ## Feed (JSON)
+
+      The full PR feed is below. Read the fields to understand the engineering
+      story, then synthesize the post per the Instructions.
+
+      ```json
+      {{feed}}
+      ```
+
+      Feed field reference:
+      - `pr_title`, `pr_body` — the PR title and raw engineering notes.
+      - `issues` — array of `{number, title, body}`: the closing issues (parent
+        + sub-issues) — the "why" behind the work.
+      - `commits` — array of `{headline, body}`: the "what".
+      - `files_changed` — array of file paths.
+      - `diffstat` — per-file additions/deletions.
+      - `merge_date` — use as the frontmatter `date`.
+      - `pr_number` — use as the frontmatter `pr`.
 
       - **Repo:** {{repo}}
       - **PR number:** {{pr_number}}
-      - **PR title:** {{pr_title}}
-      - **Merge date:** {{merge_date}} (use this as the frontmatter `date` and the filename date)
-
-      ### PR body (raw engineering notes)
-
-      {{pr_body}}
-
-      ### Closing issues (parent + sub-issues — the "why")
-
-      {{issues}}
-
-      ### Commits (the "what")
-
-      {{commits}}
-
-      ### Files changed
-
-      {{files_changed}}
-
-      ### Diffstat
-
-      {{diffstat}}
+      - **Merge date:** {{merge_date}} (use this as the frontmatter `date`)
 
       ## Instructions
 
-      1. Read the PR body and the closing issues to understand the engineering
-         story: what was built, what was ripped out, what was parked, what
-         limitation was documented.
-      2. Read the commits and diffstat to ground the post in concrete artifacts
+      1. Read `pr_body` and `issues` to understand the engineering story: what
+         was built, what was ripped out, what was parked, what limitation was
+         documented.
+      2. Read `commits` and `diffstat` to ground the post in concrete artifacts
          (files, protocols, tool names).
       3. Synthesize into 2–4 narrative sections with emoji + bold headings,
          matching the voice in the system prompt. Do NOT dump the commit list.

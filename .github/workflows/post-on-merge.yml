@@ -80,16 +80,17 @@ jobs:
           prompt-file: .github/prompts/linkedin-post.prompt.yml
           system-prompt-file: .github/prompts/linkedin-post.system.md
           model: claude-haiku-4.5
+          # Only YAML-safe scalars go in `input:`. The PR title/body and JSON
+          # arrays contain colons, `#`, and other chars that break YAML parsing
+          # (the v3 failure on PR #14's merge: "bad indentation of a mapping
+          # entry" at `pr_title: ci(post): ...`). The full feed is injected as a
+          # single {{feed}} file variable via `file_input:` instead.
           input: |
-            repo: ${{ github.repository }}
+            repo: "${{ github.repository }}"
             pr_number: ${{ fromJSON(steps.gather.outputs.feed).pr_number }}
-            pr_title: ${{ fromJSON(steps.gather.outputs.feed).pr_title }}
-            pr_body: ${{ fromJSON(steps.gather.outputs.feed).pr_body }}
-            merge_date: ${{ fromJSON(steps.gather.outputs.feed).merge_date }}
-            issues: ${{ fromJSON(steps.gather.outputs.feed).issues }}
-            commits: ${{ fromJSON(steps.gather.outputs.feed).commits }}
-            diffstat: ${{ fromJSON(steps.gather.outputs.feed).diffstat }}
-            files_changed: ${{ fromJSON(steps.gather.outputs.feed).files_changed }}
+            merge_date: "${{ fromJSON(steps.gather.outputs.feed).merge_date }}"
+          file_input: |
+            feed: feed.json
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.GC_COPILOT_TOKEN }}
 
