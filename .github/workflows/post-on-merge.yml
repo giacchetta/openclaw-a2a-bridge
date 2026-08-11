@@ -1,0 +1,140 @@
+name: Post on Merge
+
+# Generate a LinkedIn-style post from a merged PR and push it to the personal
+# site (giacchetta/giacchetta.github.io) under /post/<YYYY-MM-DD>-<slug>.md.
+# The personal repo's static.yaml workflow rebuilds and deploys on push to main.
+#
+# One merged PR == one post. The PR's closing issues (parent + sub-issues)
+# are gathered as narrative feed alongside the PR title/body/commits/diffstat.
+#
+# See .github/prompts/README.md for the prompt contract.
+
+on:
+  pull_request:
+    types: [closed]
+
+  # Manual backfill: regenerate a post from any past merged PR.
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to generate a post from"
+        required: true
+        type: string
+
+# Default token is enough for reading this repo; cross-repo push uses POSTS_PAT.
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: post-on-merge-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    # Only run on PRs merged into the default branch (or manual dispatch).
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v6
+
+      - name: Resolve PR number
+        id: pr
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "number=${{ inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install gh CLI is preinstalled on ubuntu-latest
+        run: gh --version
+
+      - name: Gather PR + linked issues feed
+        id: gather
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/gather-feed.sh > feed.json
+          # Show a compact summary in the workflow log for debugging.
+          jq '{pr_number, pr_title, repo, merge_date, issue_count: (.issues|length), commit_count: (.commits|length), files_changed: (.files_changed|length)}' feed.json
+          # Expose the feed as a step output for the inference step. Use the
+          # heredoc form so multi-line JSON survives intact into the output.
+          {
+            echo "feed<<EOF"
+            cat feed.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install Copilot CLI
+        run: npm install -g @github/copilot
+
+      - name: Run AI inference
+        id: ai
+        uses: actions/ai-inference@v3
+        with:
+          prompt-file: .github/prompts/linkedin-post.prompt.yml
+          system-prompt-file: .github/prompts/linkedin-post.system.md
+          model: claude-haiku-4.5
+          input: |
+            repo: ${{ github.repository }}
+            pr_number: ${{ fromJSON(steps.gather.outputs.feed).pr_number }}
+            pr_title: ${{ fromJSON(steps.gather.outputs.feed).pr_title }}
+            pr_body: ${{ fromJSON(steps.gather.outputs.feed).pr_body }}
+            merge_date: ${{ fromJSON(steps.gather.outputs.feed).merge_date }}
+            issues: ${{ fromJSON(steps.gather.outputs.feed).issues }}
+            commits: ${{ fromJSON(steps.gather.outputs.feed).commits }}
+            diffstat: ${{ fromJSON(steps.gather.outputs.feed).diffstat }}
+            files_changed: ${{ fromJSON(steps.gather.outputs.feed).files_changed }}
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.GC_COPILOT_TOKEN }}
+
+      - name: Validate generated post
+        id: post
+        env:
+          RESPONSE_FILE: ${{ steps.ai.outputs.response-file }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          MERGE_DATE: ${{ fromJSON(steps.gather.outputs.feed).merge_date }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/validate-post.sh
+
+      # Push to the live personal site is disabled until the generated posts are
+      # reviewed. Uncomment (and set the POSTS_PAT secret) once the output quality
+      # is verified. The artifact + log steps below let you inspect the post
+      # without publishing anything.
+      # - name: Push post to personal site
+      #   env:
+      #     POSTS_PAT: ${{ secrets.GC_TOKEN }}
+      #     POST_PATH: ${{ steps.post.outputs.path }}
+      #     POST_FILENAME: ${{ steps.post.outputs.filename }}
+      #     POST_TITLE: ${{ steps.post.outputs.title }}
+      #     PR_NUMBER: ${{ steps.pr.outputs.number }}
+      #   run: |
+      #     set -euo pipefail
+      #     bash .github/scripts/push-post.sh
+
+      - name: Print generated post to log
+        if: always()
+        env:
+          RESPONSE_FILE: ${{ steps.ai.outputs.response-file }}
+        run: |
+          echo "::group::Generated post (raw model response)"
+          if [ -n "$RESPONSE_FILE" ] && [ -f "$RESPONSE_FILE" ]; then
+            cat "$RESPONSE_FILE"
+          else
+            echo "(no response file — ai-inference step did not produce output)"
+          fi
+          echo "::endgroup::"
+
+      - name: Upload post artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-${{ steps.pr.outputs.number }}
+          path: ${{ steps.ai.outputs.response-file }}
+          if-no-files-found: warn
