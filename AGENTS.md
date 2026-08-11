@@ -630,7 +630,7 @@ poc-openclaw-01   # alias: tart run poc-openclaw-01 --no-graphics --dir ~/GC/ope
 ./vm-bridge.sh status
 
 # Run a command on the VM via the bridge (prints output when done)
-./vm-bridge.sh run 'podman ps'
+./vm-bridge.sh run 'sudo podman ps'
 
 # Stop the tmux bridge (does NOT stop the VM)
 ./vm-bridge.sh stop
@@ -648,50 +648,48 @@ From the **agent terminal** (via the bridge), or from an interactive shell that 
 
 ```bash
 # Via the bridge (agent terminal)
-./vm-bridge.sh run 'cd /mnt/workspace && podman-compose -f podman-compose.yml up -d --build'
+./vm-bridge.sh run 'cd /mnt/workspace && sudo podman-compose -f podman-compose.yml up -d --build'
 
 # Or directly on the VM (interactive shell / SSH)
-cd /mnt/workspace && podman-compose -f podman-compose.yml up -d --build
+cd /mnt/workspace && sudo podman-compose -f podman-compose.yml up -d --build
 ```
 
 ```bash
 # View running containers (via the bridge)
-./vm-bridge.sh run 'podman ps'
+./vm-bridge.sh run 'sudo podman ps'
 
 # View logs for a specific service (via the bridge)
-./vm-bridge.sh run 'podman logs researcher | tail -40'
+./vm-bridge.sh run 'sudo podman logs researcher | tail -40'
 
 # View PM2 process status inside a container (via the bridge)
-./vm-bridge.sh run 'podman exec workspace_researcher_1 pm2 status'
+./vm-bridge.sh run 'sudo podman exec workspace_researcher_1 pm2 status'
 ```
-
-> ⚠️ **Use `podman ps` (no `sudo`).** `podman-compose` runs rootless (as `admin`); `sudo podman ps` queries the separate root Podman store and shows nothing. See §11, "Rootless vs. root Podman store mismatch".
 
 ### Stop the Fleet
 
 ```bash
 # Via the bridge (agent terminal)
-./vm-bridge.sh run 'cd /mnt/workspace && podman-compose -f podman-compose.yml down'
+./vm-bridge.sh run 'cd /mnt/workspace && sudo podman-compose -f podman-compose.yml down'
 
 # Or directly on the VM
-cd /mnt/workspace && podman-compose -f podman-compose.yml down
+cd /mnt/workspace && sudo podman-compose -f podman-compose.yml down
 ```
 
 ### Send a Test Payload
 
-The agent containers don't expose host ports, so test payloads are sent from **inside the network** via `podman exec`:
+The agent containers don't expose host ports, so test payloads are sent from **inside the network** via `sudo podman exec`:
 
 ```bash
 # Via the bridge (agent terminal) — query the Researcher from inside the Coder container
-./vm-bridge.sh run 'podman exec workspace_coder_1 curl -s http://researcher:3000/a2a/tasks \
+./vm-bridge.sh run 'sudo podman exec workspace_coder_1 curl -s http://researcher:3000/a2a/tasks \
   -H "Content-Type: application/json" \
   -d "{\"jsonrpc\":\"2.0\",\"method\":\"task\",\"params\":{\"task\":\"hello\"},\"id\":\"1\"}"'
 
 # Discover an agent's card (from inside the network)
-./vm-bridge.sh run 'podman exec workspace_researcher_1 curl -s http://coder:3000/.well-known/agent.json'
+./vm-bridge.sh run 'sudo podman exec workspace_researcher_1 curl -s http://coder:3000/.well-known/agent.json'
 
 # List all registered agents in Apicurio (from inside the network)
-./vm-bridge.sh run 'podman exec workspace_researcher_1 curl -s http://apicurio:8080/apis/registry/v2/groups/default/artifacts'
+./vm-bridge.sh run 'sudo podman exec workspace_researcher_1 curl -s http://apicurio:8080/apis/registry/v2/groups/default/artifacts'
 ```
 
 > **Note on ports:** Both `researcher` and `coder` listen on port `3000` internally, but neither exposes a host port mapping in the current compose file. To send requests from the macOS host directly, add `ports: ["3001:3000"]` / `ports: ["3002:3000"]` to the compose file.
@@ -725,7 +723,6 @@ ls -la agents/coder/.openclaw/
 | **Prompt-only A2A delegation does not fire** | The Researcher reviewer's "A2A Code Delegation" directive (POST code spec to Coder, don't write code yourself) is overridden by the model's task-completion instinct — the reviewer writes the code itself and Coder's bridge never receives a delegation. Proven across 4 end-to-end tests (2026-08-01) with both reviewer and executor as the delegation point. | **Pending structural enforcement.** The directive is in place as the intended design; making it actually fire is tracked in issues #6 (live with the limitation), #7 (plugin/extend OpenClaw to enforce deterministically), and #8 (fork/build a new runtime with first-class sub-agent delegation). The orchestrator guardrails (TRUNCATED-OUTPUT, STEP 5→6 ATOMIC, EXECUTOR ERROR) are in place and working. |
 | **Orchestrator early-termination (mitigated, not fully solved)** | The Researcher `main` orchestrator can end its turn mid-loop, capturing narration as the final answer and orphaning the reviewer. Triggered by truncated executor output, the step 5→6 gap, or executor errors. | Three guardrails in `main/IDENTITY.md` (TRUNCATED-OUTPUT RULE, STEP 5→6 ATOMIC, EXECUTOR ERROR / EMPTY-OUTPUT RULE) fix the known trigger paths. Test 5 showed a residual truncation-triggered early-termination still possible; full reliability likely requires the same structural enforcement as the delegation issue above. |
 | **VS Code agent terminal cannot reach the VM's local subnet** | After a VS Code upgrade, the VS Code integrated terminal (and any process it spawns, including system binaries like `/usr/bin/ssh`) cannot reach hosts on the VM's local subnet (`192.168.64.0/24`) or the LAN (`192.168.100.0/24`). Symptom: `No route to host`. Internet and tailnet IPs still work. The block is at the system network-extension layer, applies to the whole VS Code process session regardless of binary, and is NOT caused by Tailscale, pf, the macOS Application Firewall, TCC Local Network privacy (VS Code is granted), the VS Code agent sandbox (it's off), or the Electron sandbox. An interactive Terminal.app shell on the same Mac CAN reach the VM. | **tmux bridge.** A tmux server started from an interactive Terminal.app shell runs in a working network context. The agent sends commands into the tmux session via `tmux send-keys` and reads captured output from `/tmp` files. The helper script `vm-bridge.sh` (see §10) automates this. The workspace is VirtioFS-mounted at `/mnt/workspace` on the VM, so scripts written on the macOS host are immediately executable on the VM without copying. |
-| **Rootless vs. root Podman store mismatch** | `podman-compose` runs as the `admin` user → **rootless** Podman store (`/run/user/1000/containers`). `sudo podman ps` queries the **root** Podman store (separate, empty). Checking fleet status with `sudo podman ps` shows nothing even when the fleet is running. | Always use `podman ps` (no `sudo`) to inspect the fleet. The `vm-bridge.sh status` command does this correctly. |
 
 ---
 
