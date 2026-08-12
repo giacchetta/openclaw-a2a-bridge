@@ -21,6 +21,7 @@ post from a calibrated system prompt.
 ├── scripts/
 │   ├── gather-feed.sh          # gh + jq → feed.json (PR + linked issues + commits + diffstat)
 │   ├── prepare-post.sh        # strips fences/CRLF; slug from a grepped frontmatter line, PR-title fallback
+│   ├── sanitize-post.py        # backtick-wraps bare `<word>` tokens in the body (see Sanitization below)
 │   └── push-post.sh            # clone personal repo, write src/content/blog/, commit, push via PR (idempotent)
 └── prompts/
     ├── linkedin-post.system.md # voice + hard rules (calibrated against 2 existing posts)
@@ -32,6 +33,25 @@ post from a calibrated system prompt.
 - **Automatic:** `pull_request` → `closed` → `merged == true` on `main`.
 - **Backfill:** `workflow_dispatch` with `pr_number` input regenerates a post
   from any past merged PR.
+
+## Sanitization
+
+`prepare-post.sh` routes the model's body through `sanitize-post.py` before
+writing `cleaned_file`. It backtick-wraps any bare `<word>` or
+`<word>__<word>` token left un-escaped in the body (leaving real HTML tags,
+autolinks, and anything already in code/fences alone). This closes a
+production incident (PR #13) where an un-escaped `bundle-mcp:<server>__<tool>`
+was parsed as raw unclosed HTML, which silently corrupted the site's
+`astro-llms-md` build step — `querySelector('main')` returned `null`, so the
+post's `.md`/`llms.txt` extraction came back empty with no build error.
+
+The sanitizer **fixes and warns** (`::warning::` per rewritten line) rather
+than failing the job — it never blocks the PR; the CODEOWNER review on the
+target repo remains the backstop. `linkedin-post.system.md` also carries a
+hard rule telling the model to backtick these tokens itself; the script is
+the guarantee, not the first line of defense. Its logic is covered by
+table-driven self-tests run as a workflow step before AI inference:
+`python3 .github/scripts/sanitize-post.py --self-test`.
 
 ## Secrets (repo Actions secrets)
 

@@ -18,6 +18,14 @@
 # left untouched (the CODEOWNER reviews the PR before merge and catches any
 # model formatting drift at build time on the personal repo).
 #
+# The body then goes through sanitize-post.py, which backtick-wraps any bare
+# `<word>` / `<word>__<word>` run left in the body. Un-backticked `<word>` is
+# parsed as raw, unclosed inline HTML in Markdown; it silently corrupted the
+# site's astro-llms-md build step in production (PR #13: querySelector('main')
+# returned null after an un-escaped `bundle-mcp:<server>__<tool>`, emptying
+# the post's .md/llms.txt output with no build error). The sanitizer fixes
+# and warns rather than failing the job — see sanitize-post.py's header.
+#
 # Inputs (env):
 #   RESPONSE_FILE  — path to the model response (from actions/ai-inference output)
 #   PR_TITLE       — the PR title (from gather; slug fallback + commit msg)
@@ -30,6 +38,8 @@
 #   slug          — the post's slug (from frontmatter, or slugified PR title)
 #   cleaned_file  — stable path to the cleaned content (frontmatter + body)
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${RESPONSE_FILE:?RESPONSE_FILE env is required}"
 : "${PR_TITLE:?PR_TITLE env is required}"
@@ -109,9 +119,13 @@ FILENAME="${SLUG}.md"
 POST_PATH="src/content/blog/${FILENAME}"
 
 # Write the cleaned content (frontmatter + body, no code fences) to a stable
-# path the push script reads.
-CLEANED_FILE="$(mktemp -d)/${FILENAME}"
-printf '%s\n' "$CONTENT" > "$CLEANED_FILE"
+# path the push script reads, routing the body through the sanitizer first
+# (backtick-wraps any bare `<word>` run; see the header comment above).
+TMP_DIR="$(mktemp -d)"
+RAW_FILE="${TMP_DIR}/${FILENAME}.raw"
+CLEANED_FILE="${TMP_DIR}/${FILENAME}"
+printf '%s\n' "$CONTENT" > "$RAW_FILE"
+python3 "${SCRIPT_DIR}/sanitize-post.py" "$RAW_FILE" "$CLEANED_FILE"
 
 {
   echo "path=${POST_PATH}"

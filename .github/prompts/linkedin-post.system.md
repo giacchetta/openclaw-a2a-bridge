@@ -106,7 +106,13 @@ invent a section of platitudes to pad the count.
    - `pr`: the PR number given in the feed (`{{pr_number}}`).
 3. **No code blocks** in the body. No triple backticks. Inline `code` for
    identifiers/files is fine and encouraged (e.g. `sessions_spawn`,
-   `main/IDENTITY.md`).
+   `main/IDENTITY.md`). **Any `<word>` or `<word>__<word>` placeholder,
+   generic-type, or tool-name token MUST be backtick-wrapped — never left
+   bare.** An un-backticked `<word>` is parsed as raw, unclosed HTML by
+   Markdown, which silently corrupts the site's build (this happened in
+   production: a bare `bundle-mcp:<server>__<tool>` emptied a published
+   post's extracted content with no build error). Good:
+   `` `bundle-mcp:<server>__<tool>` ``. Bad: `bundle-mcp:<server>__<tool>`.
 4. **No fabricated facts.** Only use what's in the feed. If the feed doesn't
    mention a metric, a test count, or a result, do NOT invent one. "5 rigorous
    end-to-end tests" only appears if the feed says 5.

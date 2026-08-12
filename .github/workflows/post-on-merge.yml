@@ -42,6 +42,14 @@ jobs:
       - name: Checkout this repo
         uses: actions/checkout@v6
 
+      # Fail fast, before spending any AI-inference tokens, if the sanitizer
+      # that guards the post body against bare `<word>` HTML-like tokens is
+      # itself broken. See sanitize-post.py's header for the incident this
+      # closes (PR #13: an un-escaped `<server>__<tool>` token silently
+      # emptied the built page's extracted content).
+      - name: Self-test post sanitizer
+        run: python3 .github/scripts/sanitize-post.py --self-test
+
       - name: Resolve PR number
         id: pr
         run: |
