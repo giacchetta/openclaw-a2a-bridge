@@ -7,21 +7,27 @@
 # Inputs (env):
 #   POSTS_PAT     — PAT with contents:write + pull-requests:write on
 #                  giacchetta/giacchetta.github.io
-#   POST_PATH     — target path in the personal repo (e.g. post/2026-08-11-foo.md)
-#   POST_FILENAME — filename only (e.g. 2026-08-11-foo.md)
+#   POST_PATH     — target path in the personal repo (e.g.
+#                  src/content/blog/gateway-websocket-orchestration.md)
+#   POST_FILENAME — filename only (e.g. gateway-websocket-orchestration.md)
 #   POST_TITLE    — post title (for the commit message + PR title)
 #   PR_NUMBER     — source PR number (for the commit message + idempotency)
 #   SOURCE_REPO   — source repo in owner/name form (for the PR body link);
 #                   defaults to the current GITHUB_REPOSITORY env var
 #
-# Branch model: one branch per post, named post/<YYYY-MM-DD>-<slug> (derived
-# from POST_FILENAME by stripping the .md suffix). Re-runs of the same source
-# PR (or backfill of the same post) reuse the same branch and PR.
+# Branch model: one branch per source PR, named post/<slug> (derived from
+# POST_FILENAME by stripping the .md suffix). Re-runs of the same source PR
+# (or backfill of the same post) reuse the same branch and PR.
 #
-# Idempotency: if a post with the same filename already exists on the branch
-# AND its frontmatter carries the same pr: <number>, we overwrite it (safe
-# re-run). If it exists with a DIFFERENT pr: number, we abort to avoid
-# clobbering an unrelated post.
+# Idempotency: the slug (and therefore POST_FILENAME/POST_PATH) is derived
+# from the model's own frontmatter, so it can differ between runs of the same
+# PR_NUMBER. Before writing, we look for any existing post in the target
+# directory that already carries this pr: <number> and, if its filename
+# differs from POST_PATH, `git mv` it into place first — otherwise a re-run
+# with a new model-chosen slug would publish a second, duplicate post instead
+# of updating the first. If POST_PATH already exists with a DIFFERENT pr:
+# number (a slug collision with an unrelated post), we abort rather than
+# clobber it.
 set -euo pipefail
 
 : "${POSTS_PAT:?POSTS_PAT env is required}"
@@ -60,8 +66,19 @@ else
   git checkout -b "${BRANCH_NAME}"
 fi
 
-# Ensure the post/ directory exists.
+# Ensure the target content directory exists — on a fresh site with no posts
+# published yet, src/content/blog/ legitimately doesn't exist.
 mkdir -p "$(dirname "$POST_PATH")"
+
+# Rename-on-rerun guard: if a post for this PR_NUMBER already exists under a
+# DIFFERENT filename (the model chose a different slug this time), move it to
+# POST_PATH first so the diff/commit below updates the existing post in
+# place instead of leaving the old file behind as an orphaned duplicate.
+EXISTING_FILE_FOR_PR="$(grep -rl --include='*.md' -E "^pr:[[:space:]]*${PR_NUMBER}[[:space:]]*\$" "$(dirname "$POST_PATH")" 2>/dev/null | head -n1 || true)"
+if [ -n "$EXISTING_FILE_FOR_PR" ] && [ "$EXISTING_FILE_FOR_PR" != "$POST_PATH" ]; then
+  echo "::notice::PR ${PR_NUMBER} already published as ${EXISTING_FILE_FOR_PR}; renaming to ${POST_PATH}."
+  git mv "$EXISTING_FILE_FOR_PR" "$POST_PATH"
+fi
 
 # Idempotency check: if the file exists and already references this PR, it's a
 # re-run — overwrite. If it exists with a DIFFERENT pr: number, abort to avoid

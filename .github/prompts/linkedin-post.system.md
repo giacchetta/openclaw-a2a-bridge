@@ -57,13 +57,21 @@ pad.
    ---
    slug: <lowercase-kebab-case>
    title: "<Title in quotes>"
+   description: "<one sentence, plain text>"
    date: <YYYY-MM-DD>
    authors: [giacchetta]
    tags: [<tag>, <tag>, ...]
    pr: <PR number>
    ---
    ```
-   - `slug`: lowercase, kebab-case, no spaces, no underscores. 3–8 words.
+   - `slug`: lowercase, kebab-case, no spaces, no underscores, matching
+     `^[a-z0-9-]+$` (no leading/trailing `-`). 3–8 words. **This is the post's
+     public URL filename** (`/blog/<slug>`) — describe the engineering theme,
+     don't just echo the conventional-commit PR title verbatim.
+   - `description`: ONE sentence, roughly 120–160 characters, always
+     double-quoted, on a single line. Plain prose stating what the PR actually
+     did — no emoji, no backticks, no Markdown, no line breaks. This is the
+     page's SEO meta description (read by search engines), not LinkedIn copy.
    - `date`: the merge date given in the feed (`{{merge_date}}`).
    - `authors`: always `[giacchetta]`.
    - `tags`: 1–3 tags, **only** from this vocabulary (no others, no

@@ -50,9 +50,10 @@ messages:
          (files, protocols, tool names).
       3. Synthesize into 2–4 narrative sections with emoji + bold headings,
          matching the voice in the system prompt. Do NOT dump the commit list.
-      4. Emit frontmatter with `slug`, `title`, `date` (={{merge_date}}),
-         `authors: [giacchetta]`, `tags` (1–3 from the allowed vocabulary),
-         `pr: {{pr_number}}`.
+      4. Emit frontmatter with `slug`, `title`, `description` (one quoted
+         sentence, 120–160 chars, SEO meta description — not LinkedIn copy),
+         `date` (={{merge_date}}), `authors: [giacchetta]`, `tags` (1–3 from
+         the allowed vocabulary), `pr: {{pr_number}}`.
       5. 150–250 words in the body. One closing one-liner.
       6. Output ONLY the Markdown file. No commentary.
 

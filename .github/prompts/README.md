@@ -1,9 +1,11 @@
 # Post-on-merge pipeline
 
 Generates a LinkedIn-style post from a merged PR and pushes it to the personal
-site (`giacchetta/giacchetta.github.io`) under `post/<YYYY-MM-DD>-<slug>.md`.
-The personal repo's `static.yaml` workflow rebuilds and deploys on push to
-`main`, so the post goes live automatically.
+site (`giacchetta/giacchetta.github.io`) under
+`src/content/blog/<slug>.md` — an Astro content collection, where the
+filename is the post's public URL (`/blog/<slug>`). The personal repo's
+`static.yaml` workflow rebuilds and deploys on push to `main`, so the post
+goes live automatically.
 
 **One merged PR == one post.** The PR's closing issues (parent + sub-issues)
 are gathered as narrative feed alongside the PR title/body/commits/diffstat,
@@ -18,8 +20,8 @@ post from a calibrated system prompt.
 │   └── post-on-merge.yml        # trigger: pull_request closed + merged; workflow_dispatch backfill
 ├── scripts/
 │   ├── gather-feed.sh          # gh + jq → feed.json (PR + linked issues + commits + diffstat)
-│   ├── prepare-post.sh        # lenient frontmatter extraction; strips fences/CRLF, derives slug/title
-│   └── push-post.sh            # clone personal repo, write post/, commit, push (idempotent)
+│   ├── prepare-post.sh        # strips fences/CRLF; slug from a grepped frontmatter line, PR-title fallback
+│   └── push-post.sh            # clone personal repo, write src/content/blog/, commit, push via PR (idempotent)
 └── prompts/
     ├── linkedin-post.system.md # voice + hard rules (calibrated against 2 existing posts)
     └── linkedin-post.prompt.yml # user-message template ({{repo}}, {{pr_body}}, {{issues}}, …)
@@ -42,17 +44,21 @@ post from a calibrated system prompt.
 
 ## Output
 
-- **Personal repo** (`giacchetta/giacchetta.github.io`): `post/<YYYY-MM-DD>-<slug>.md`
-  — always. The repo's `static.yaml` deploys it.
+- **Personal repo** (`giacchetta/giacchetta.github.io`): `src/content/blog/<slug>.md`
+  — always, via a short-lived `post/<slug>` branch + pull request (never a direct
+  push to `main`). Merging that PR is what deploys it, via the repo's `static.yaml`.
 - **Company repo** (`gianet-us/www_gianet_us`): not wired yet (Phase 2). Posts
   are re-posted manually for now.
 
 ## Idempotency
 
-The post's frontmatter carries `pr: <number>`. On re-run, `push-post.sh`
-overwrites a file with the same filename AND same `pr:` value, aborts if the
-filename exists with a *different* `pr:` value, and no-ops if the content is
-unchanged.
+The post's frontmatter carries `pr: <number>`. The filename (slug) is
+model-chosen, so it can differ between runs of the same PR: on re-run,
+`push-post.sh` first looks for an existing post under `src/content/blog/`
+carrying the same `pr:` and, if its filename differs, renames it into place
+(`git mv`) rather than publishing a duplicate. It then overwrites that file if
+its `pr:` matches (safe re-run), aborts if `pr:` differs (an unrelated post
+happens to have the same slug), and no-ops if the content is unchanged.
 
 ## Model
 
