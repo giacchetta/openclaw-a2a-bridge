@@ -13,7 +13,7 @@ Before reading user requests or modifying ANY file, you MUST follow this exact e
 # 🏛️ Local Architecture Blueprint
 
 > **Document status:** Production-ready PoC blueprint.
-> **Last updated:** 2026-08-01
+> **Last updated:** 2026-08-11 (MCP tool servers added, §12)
 
 ---
 ## 📝 Companion Document: `README.md`
@@ -44,6 +44,7 @@ This repository also ships a human-oriented **[`README.md`](./README.md)** — a
 9. [Fleet Inventory](#9-fleet-inventory)
 10. [Operational Notes](#10-operational-notes)
 11. [Known Constraints & Workarounds](#11-known-constraints--workarounds)
+12. [MCP Tool Servers](#12-mcp-tool-servers)
 
 ---
 
@@ -51,12 +52,14 @@ This repository also ships a human-oriented **[`README.md`](./README.md)** — a
 
 This repository implements a **centralized Agent-to-Agent (A2A) network** in which multiple OpenClaw-powered agent containers communicate over a shared Docker bridge network using JSON-RPC 2.0 payloads. Each container runs two processes managed by PM2:
 
-1. **A2A Express Bridge** (`index.js`) — an HTTP server that receives JSON-RPC task requests, routes them to the local OpenClaw root agent via the CLI, and returns structured JSON responses.
-2. **OpenClaw Gateway** — the OpenClaw runtime that manages the agent's cognitive loop, sub-agent delegation, and tool execution.
+1. **A2A Express Bridge** (`index.js`) — an HTTP server that receives JSON-RPC task requests, routes them to the local OpenClaw root agent over the Gateway WebSocket, and returns structured JSON responses.
+2. **OpenClaw Gateway** — the OpenClaw runtime that runs the agent's cognitive loop and tool execution.
 
 An **Apicurio Registry** container serves as a lightweight service-discovery layer: each agent registers an **Agent Card** (metadata describing its role, protocols, and endpoint) on startup, allowing other agents or external clients to discover and address peers dynamically.
 
 The fleet currently consists of two specialized agents — **Researcher** and **Coder** — each sharing the same Docker image but customized through environment variables and isolated `.openclaw` state directories.
+
+> **Operating mode — single-agent-per-container (#9, #11).** Each container runs **one working agent** (`main`) that does the task itself using full tool access. The original **tri-node** design (planner → executor → reviewer sub-agents, with the Researcher's reviewer delegating code to the Coder over A2A) is **parked** as future work pending an OpenClaw fix: OpenClaw sub-agents cannot reliably drive cross-agent A2A calls, and the prompt-level delegation directive was overridden by the model's task-completion instinct. The tri-node artifacts are **preserved, not deleted** — sub-agent entries are commented out in `openclaw.json` (JSON5), the orchestrator prompts are saved as `IDENTITY.tri-node.md`, the sub-agent directories are untouched, and git tag `v0.1.0` (commit `5e428c0`) is the revival baseline. Cross-agent A2A **does** work in single-agent mode: the Researcher's `main` curls the Coder's bridge directly when a task needs code (see §8). See §8 for the parked design and revival path, and §11 for the constraint that parked it.
 
 ---
 
@@ -66,17 +69,20 @@ The fleet currently consists of two specialized agents — **Researcher** and **
 ┌─────────────────────────────────────────────────────────────────┐
 │                        macOS Host                                │
 │                                                                 │
-│   ~/poc/openclaw-workspace/                                     │
+│   ~/GC/openclaw-a2a-bridge/                                     │
 │   ├── Dockerfile                                                │
 │   ├── ecosystem.config.js                                       │
 │   ├── index.js                                                  │
 │   ├── podman-compose.yml                                        │
+│   ├── vm-bridge.sh          (tmux bridge helper)                │
 │   ├── AGENTS.md                                                 │
 │   └── agents/                                                   │
-│       ├── researcher/.openclaw/  (planner, executor, reviewer)   │
-│       └── coder/.openclaw/      (planner, executor, reviewer)   │
+│       ├── researcher/.openclaw/  (main; planner/executor/        │
+│       │                          reviewer PARKED, see §8)       │
+│       └── coder/.openclaw/      (main; planner/executor/        │
+│                                    reviewer PARKED, see §8)     │
 │                                                                 │
-│         │  VirtioFS mount                                        │
+│         │  VirtioFS mount → /mnt/workspace on the VM            │
 │         ▼                                                       │
 │ ┌─────────────────────────────────────────────────────────────┐ │
 │ │              Fedora VM (Tart: poc-openclaw-01)               │ │
@@ -128,12 +134,12 @@ External Client / Peer Agent
 │       c. subscribe to `chat` events for            │
 │            sessionKey=agent:main:main; wait for    │
 │            the final synthesized assistant         │
-│            message (arrives under a RESUMED        │
-│            runId after the spawn tree finishes).   │
-│            `agent.wait` is raced only for early    │
-│            error detection — it resolves at the    │
-│            FIRST sessions_yield, NOT at spawn-tree │
-│            completion.                             │
+│            message.                                │
+│       d. `agent.wait` is raced in parallel for     │
+│            early error detection. In single-agent  │
+│            mode there is no sessions_yield, so     │
+│            agent.wait resolves at run completion    │
+│            (not at the first yield, as in tri-node).│
 │  5. Wrap synthesized result in JSON-RPC envelope    │
 └───────────┬───────────────────────────────────────┘
             │
@@ -142,15 +148,16 @@ External Client / Peer Agent
 │   OpenClaw Gateway (PM2 → npx openclaw gateway run) │
 │   WS server on 127.0.0.1:18789 (token auth)         │
 │                                                    │
-│   Root Agent (main)                                │
-│     ├── planner   (sessions_spawn, non-blocking)   │
-│     ├── executor  (sessions_spawn, non-blocking)   │
-│     └── reviewer  (sessions_spawn, non-blocking)   │
+│   Root Agent (main) — single-agent mode (#9):       │
+│     main does the task ITSELF using full tool       │
+│     access (exec, web_fetch, read/write/edit).      │
+│     No sessions_spawn / sessions_yield; no spawn   │
+│     tree. On the Researcher, main curls the Coder   │
+│     bridge directly when a task needs code (§8).    │
 │                                                    │
-│   main calls sessions_yield (ends the ORIGINAL      │
-│   runId's turn); sub-agents run in the background; │
-│   the main session's final synthesized message     │
-│   arrives later under a RESUMED runId (new turn).  │
+│   [PARKED — tri-node: planner/executor/reviewer     │
+│    sub-agents via sessions_spawn. See §8 + tag      │
+│    v0.1.0 for the revival path.]                    │
 └───────────────────────────────────────────────────┘
 ```
 
@@ -169,7 +176,7 @@ External Client / Peer Agent
 
 ### File Sharing (VirtioFS)
 
-The local macOS workspace at `~/poc/openclaw-workspace` is mounted into the Fedora VM via **VirtioFS**. Podman then bind-mounts this directory into each container at `/app`:
+The local macOS workspace at `~/GC/openclaw-a2a-bridge` is mounted into the Fedora VM via **VirtioFS** at `/mnt/workspace` (configured via the Tart `--dir` flag: `--dir ~/GC/openclaw-a2a-bridge:tag=workspace`). Podman then bind-mounts this directory into each container at `/app`:
 
 ```yaml
 # podman-compose.yml (per-service)
@@ -177,7 +184,7 @@ volumes:
   - .:/app
 ```
 
-This means any change to agent configuration files (`.openclaw/` directories, prompt files, etc.) on the macOS host is immediately reflected inside the running containers without rebuilding the image.
+This means any change to agent configuration files (`.openclaw/` directories, prompt files, etc.) on the macOS host is immediately reflected inside the running containers without rebuilding the image. Scripts written on the macOS host are also directly executable on the VM at `/mnt/workspace/<script>.sh` — no `scp` needed.
 
 ### SELinux Configuration
 
@@ -262,6 +269,8 @@ The Express bridge is the network-facing component of each agent container. It e
 
 ### Why the bridge speaks the Gateway WebSocket, not the CLI
 
+> **Single-agent mode note (#9, #11):** In the current operating mode there is **no spawn tree** — `main` does the task itself and never calls `sessions_yield`. The WS lifecycle below is therefore simpler in practice: `agent.wait` resolves at **run completion** (not at a first yield), and the final `chat` event arrives on the **same runId** (not a resumed one). The tri-node rationale and the "resumed runId" semantics are preserved below as the **historical/future** rationale — they describe the behavior the bridge was originally built to handle and will apply again if the tri-node is revived (see §8). The bridge code is unchanged; only the runtime behavior differs.
+
 The original bridge shelled out to the OpenClaw CLI:
 
 ```bash
@@ -278,10 +287,12 @@ The fix is to use the documented Gateway WebSocket lifecycle, which separates **
 |------|-------------------|---------|-----------|
 | 1 | `connect` (challenge-first, device-signed) | `hello-ok` | Handshake + token auth |
 | 2 | `agent` | `{ runId, acceptedAt }` | Accept the run (fire-and-forget) |
-| 3 | `chat` events (subscribed) | final assistant message | **Wait for the main session's final synthesized `chat` event** (`sessionKey=agent:main:main`, `state=final`, `role=assistant`). This arrives under a **resumed runId** (new turn) AFTER the whole spawn tree finishes. |
-| 4 | `agent.wait` (raced, error-only) | `{ status, startedAt, endedAt, error? }` | Resolves at the **first `sessions_yield`** (lifecycle end of the ORIGINAL runId) — NOT at spawn-tree completion. Used only to surface early errors; its resolution is NOT treated as completion. |
+| 3 | `chat` events (subscribed) | final assistant message | **Wait for the main session's final synthesized `chat` event** (`sessionKey=agent:main:main`, `state=final`, `role=assistant`). In tri-node mode this arrives under a **resumed runId** (new turn) AFTER the whole spawn tree finishes; in single-agent mode it arrives on the **same runId** when `main` completes. |
+| 4 | `agent.wait` (raced, error-only) | `{ status, startedAt, endedAt, error? }` | Resolves at the **first `sessions_yield`** (lifecycle end of the ORIGINAL runId) — NOT at spawn-tree completion. Used only to surface early errors; its resolution is NOT treated as completion. **In single-agent mode there is no `sessions_yield`, so `agent.wait` resolves at run completion** — but it is still raced only for early-error detection; the `chat` event remains the source of truth. |
 
-> ⚠️ **`agent.wait` does NOT block until the spawn tree finishes.** It resolves at the first `sessions_yield`, which ends the original runId's turn. Sub-agents (planner → executor → reviewer) keep running in the background; the main session's final synthesized message arrives later under a **resumed runId** (new turn). The bridge therefore waits for the main session's final `chat` event, not for `agent.wait`.
+> ⚠️ **`agent.wait` does NOT block until the spawn tree finishes (tri-node mode).** It resolves at the first `sessions_yield`, which ends the original runId's turn. Sub-agents (planner → executor → reviewer) keep running in the background; the main session's final synthesized message arrives later under a **resumed runId** (new turn). The bridge therefore waits for the main session's final `chat` event, not for `agent.wait`.
+>
+> **In single-agent mode (#9)** there is no `sessions_yield` and no spawn tree, so `agent.wait` resolves at run completion and the final `chat` event arrives on the same runId. The bridge still treats the `chat` event as the source of truth and uses `agent.wait` only to surface early errors.
 
 > ⚠️ **`sessions.history` is NOT used.** It requires the `operator.admin` scope; the device is approved for `operator.write` only, so `sessions.history` triggers `PAIRING_REQUIRED`. The result is read from the `chat` event stream instead.
 
@@ -342,7 +353,7 @@ Accepts a JSON-RPC 2.0 payload and routes the task to the local OpenClaw root ag
 1. The bridge extracts `payload.params.task` (falling back to `"status"` if absent).
 2. It opens a WebSocket to `GATEWAY_WS_URL` and performs the `connect` handshake with `GATEWAY_AUTH_TOKEN`.
 3. It sends an `agent` request with `{ agentId, sessionKey, message, idempotencyKey }` and captures `runId`.
-4. It subscribes to `chat` events for `sessionKey=agent:main:main` and waits for the final synthesized assistant message. In parallel, it races `agent.wait` with `{ runId, timeoutMs: RUN_TIMEOUT_MS }` **for early error detection only** — `agent.wait` resolves at the first `sessions_yield` (NOT at spawn-tree completion), so its resolution is not treated as completion; only an error on `agent.wait` is surfaced. The main session's final synthesized message arrives later under a resumed runId (new turn) after the whole spawn tree (planner → executor → reviewer) finishes.
+4. It subscribes to `chat` events for `sessionKey=agent:main:main` and waits for the final synthesized assistant message. In parallel, it races `agent.wait` with `{ runId, timeoutMs: RUN_TIMEOUT_MS }` **for early error detection only** — `agent.wait` resolves at the first `sessions_yield` (NOT at spawn-tree completion), so its resolution is not treated as completion; only an error on `agent.wait` is surfaced. In single-agent mode (#9) there is no `sessions_yield`, so `agent.wait` resolves at run completion and the final `chat` event arrives on the same runId; in tri-node mode the main session's final synthesized message arrives later under a resumed runId (new turn) after the whole spawn tree (planner → executor → reviewer) finishes.
 5. The final assistant content (captured from the `chat` event stream, with fallbacks to concatenated deltas and `lastFinalText` when the final event has `hasMsg=false`) is collapsed to a string and parsed as JSON when possible (falling back to the raw string), then wrapped in a JSON-RPC 2.0 response envelope.
 
 **Success response:**
@@ -467,8 +478,8 @@ The bridge uses the documented WS lifecycle:
 |-------------------|---------|
 | `connect` (challenge-first, device-signed) | Handshake + token auth (`GATEWAY_AUTH_TOKEN`) |
 | `agent` | Accept the run on `agentId`/`sessionKey`, get `runId` |
-| `chat` events (subscribed) | Wait for the main session's final synthesized assistant message (`sessionKey=agent:main:main`, `state=final`) — arrives under a resumed runId after the spawn tree finishes |
-| `agent.wait` (raced, error-only) | Resolves at the first `sessions_yield` (NOT spawn-tree completion); used only to surface early errors |
+| `chat` events (subscribed) | Wait for the main session's final synthesized assistant message (`sessionKey=agent:main:main`, `state=final`) — in tri-node mode arrives under a resumed runId after the spawn tree finishes; in single-agent mode (#9) arrives on the same runId when `main` completes |
+| `agent.wait` (raced, error-only) | Resolves at the first `sessions_yield` (NOT spawn-tree completion); used only to surface early errors. In single-agent mode there is no `sessions_yield`, so it resolves at run completion — still raced only for early-error detection |
 
 The WebSocket connection inherits the container's environment, and `OPENCLAW_STATE_DIR` points the in-container Gateway at the correct isolated agent's state directory. The `agentId` (`main`) and `sessionKey` (`main`) target the root agent registered in that state directory.
 
@@ -508,13 +519,25 @@ Instructs the agent that:
 
 #### `IDENTITY.md`
 
-Defines the agent's **domain persona** and enforces the delegation pattern:
-- **Researcher:** Lead Researcher persona. Delegates research tasks through the sub-agent loop.
-- **Coder:** Lead Coder persona. Delegates coding tasks through the sub-agent loop.
+Defines the agent's **domain persona**. In single-agent mode (#9):
+- **Researcher:** Does the research work itself using full tool access. When a task requires code, `main` curls the Coder's bridge directly over A2A (see "A2A Code Delegation" below) and folds the Coder's `result.output` into its final deliverable. It never writes code itself.
+- **Coder:** Does the coding work itself using full tool access. It receives a code-generation spec (from the Researcher over A2A, or a direct request from an external client), produces the code, and returns it as a structured JSON deliverable. It is a leaf node — it never calls back to the Researcher.
 
-The root agent **does not execute tasks itself**. Its sole function is to receive the task instruction from the bridge, delegate it through the standardized sub-agent loop, and return the synthesized result.
+> **Tri-node (PARKED):** The original `IDENTITY.md` described `main` as an orchestrator-only router that delegates through the planner → executor → reviewer loop. That prompt is preserved as `IDENTITY.tri-node.md` (see "The Standardized Sub-Agent Loop" below for the parked design and revival path).
 
-### The Standardized Sub-Agent Loop
+### The Standardized Sub-Agent Loop (PARKED — future design pending an OpenClaw fix)
+
+> ⚠️ **Status — PARKED (#9, #11).** The tri-node sub-agent loop (planner → executor → reviewer) is the **intended architecture**, preserved here as the future design. It is **not currently active**. It is parked because of an OpenClaw platform limitation: OpenClaw sub-agents cannot reliably drive cross-agent A2A calls, and the prompt-level delegation directive (Researcher's reviewer → Coder) was overridden by the model's task-completion instinct — the reviewer wrote the code itself and the Coder's bridge never received a delegation (proven across 4 end-to-end tests, 2026-08-01). See §11 for the constraint row.
+>
+> **Current mode — single-agent-per-container:** `main` does the task itself using full tool access. On the Researcher, `main` curls the Coder's bridge directly when a task needs code (see "A2A Code Delegation" below). There is no `sessions_spawn` / `sessions_yield` and no spawn tree.
+>
+> **Revival path (when the OpenClaw fix lands):**
+> 1. In each agent's `openclaw.json` (JSON5), **uncomment** the `planner` / `executor` / `reviewer` entries in `agents.list`, and **uncomment** `main`'s `deny` list + `alsoAllow` (`sessions_spawn`, `sessions_yield`, `subagents`) so `main` becomes an orchestrator-only router again.
+> 2. **Swap** `IDENTITY.tri-node.md` back to `IDENTITY.md` (the single-agent `IDENTITY.md` is preserved in git history / on the branch).
+> 3. The sub-agent directories (`agents/{researcher,coder}/.openclaw/agents/{planner,executor,reviewer}/` and `workspace/{planner,executor,reviewer}/`) are **untouched** — no re-creation needed.
+> 4. **Baseline:** git tag `v0.1.0` (commit `5e428c0`) is the revival baseline; the tri-node artifacts were preserved in commit `717b2cd` (issue #9). See issues #6 (umbrella), #7 (plugin/extend OpenClaw), #8 (fork/build a new runtime) for the structural-enforcement options under evaluation.
+>
+> The description below is the **parked design** — the architecture the bridge was built to handle and will apply again once revived.
 
 Every root agent contains the **exact same tri-node architecture** — three sub-agents registered in the agent's `.openclaw` directory. The architecture is identical across all agents; only the `IDENTITY.md` customization (Research vs. Coding domain) differs.
 
@@ -557,14 +580,18 @@ Every root agent contains the **exact same tri-node architecture** — three sub
 | **Quality gates** | Verifies factual claims, checks code correctness, ensures JSON compliance, strips any conversational filler. |
 | **Output** | The final, pristine deliverable — synthesized and formatted for JSON-RPC response back to the network. |
 
-> **Researcher reviewer — A2A code delegation (prompt-based, pending enforcement):**
-> The Researcher's `reviewer/IDENTITY.md` carries an **"A2A Code Delegation"** directive: when the task requires generating or modifying code, the reviewer is instructed to POST a precise code spec to the Coder agent at `http://coder:3000/a2a/tasks` (JSON-RPC) and fold the Coder's `result.output` into its synthesized deliverable, rather than writing the code itself. The delegation is **one-way** (Coder never calls back to Researcher) and **code-only** (research/synthesis stays the reviewer's job).
+> **Researcher reviewer — A2A code delegation (PARKED with the tri-node design):**
+> In the parked tri-node design, the Researcher's `reviewer/IDENTITY.md` carries an **"A2A Code Delegation"** directive: when the task requires generating or modifying code, the reviewer is instructed to POST a precise code spec to the Coder agent at `http://coder:3000/a2a/tasks` (JSON-RPC) and fold the Coder's `result.output` into its synthesized deliverable, rather than writing the code itself. The delegation is **one-way** (Coder never calls back to Researcher) and **code-only** (research/synthesis stays the reviewer's job).
 >
-> ⚠️ **Status — pending enforcement (agent-platform limitation):** End-to-end testing (2026-08-01) showed this directive does **not** fire in practice. The reviewer is a capable model with `tools.profile: "full"` (exec/curl access), and its task-completion instinct overrides the prompt-level "FORBIDDEN FROM WRITING CODE" rule — it generates the code itself and Coder's bridge never receives a delegation. This is tracked as an **agent-platform limitation**, not a model limitation (other non-OpenClaw agents perform sub-agent delegation reliably). See §11 and issues #6/#7/#8 for the structural-enforcement options under evaluation.
+> ⚠️ **Status — PARKED (agent-platform limitation, #9/#11):** End-to-end testing (2026-08-01) showed this directive does **not** fire in practice. The reviewer is a capable model with `tools.profile: "full"` (exec/curl access), and its task-completion instinct overrides the prompt-level "FORBIDDEN FROM WRITING CODE" rule — it generates the code itself and Coder's bridge never receives a delegation. This is tracked as an **agent-platform limitation**, not a model limitation (other non-OpenClaw agents perform sub-agent delegation reliably). See §11 and issues #6/#7/#8 for the structural-enforcement options under evaluation.
+>
+> ✅ **Single-agent mode — A2A delegation DOES fire (#10):** In the current single-agent mode, the Researcher's `main` (not the reviewer) curls the Coder's bridge directly when a task needs code. Live testing (2026-08-11) confirmed the Coder receives the payload and generates the code — the cross-agent A2A call works end-to-end. The residual issues are output-formatting hygiene (narration prefixes, markdown fences), not delegation failure. See §11.
 
-### Orchestrator Guardrails (Researcher `main`)
+### Orchestrator Guardrails (Researcher `main`) — PARKED with the tri-node design
 
-The Researcher root agent (`main/IDENTITY.md`) carries three guardrails that fix recurring early-termination failure modes discovered during end-to-end testing. Without them, the orchestrator tended to end its turn mid-loop, capturing narration as the final answer and orphaning the reviewer.
+> ⚠️ **Status — PARKED (#9, #11).** These guardrails apply to the tri-node orchestrator prompt (`IDENTITY.tri-node.md`), which is **not currently active**. In single-agent mode, `main` does the task itself — there is no spawn loop to terminate early, so these failure modes do not arise. The guardrails are preserved here with the parked design and will apply again when the tri-node is revived (see the revival path above).
+
+The Researcher root agent (`main/IDENTITY.tri-node.md`) carries three guardrails that fix recurring early-termination failure modes discovered during end-to-end testing. Without them, the orchestrator tended to end its turn mid-loop, capturing narration as the final answer and orphaning the reviewer.
 
 | Guardrail | Failure mode it fixes |
 |----------|----------------------|
@@ -572,9 +599,9 @@ The Researcher root agent (`main/IDENTITY.md`) carries three guardrails that fix
 | **STEP 5→6 ATOMIC** | `sessions_spawn(reviewer)` and `sessions_yield` must happen back-to-back in the same turn (fixes the reviewer being orphaned when the orchestrator ends after spawning it). |
 | **EXECUTOR ERROR / EMPTY-OUTPUT RULE** | On executor error or empty output, do not re-spawn the executor; proceed immediately to the reviewer with the blueprint plus a factual failure note. There is no "STEP 4b: retry executor" step. |
 
-### Domain Customization
+### Domain Customization (PARKED with the tri-node design)
 
-The tri-node architecture is identical, but each agent's `IDENTITY.md` customizes the domain:
+The tri-node architecture is identical, but each agent's `IDENTITY.md` customizes the domain. In single-agent mode, the same domain split applies to `main` directly (Researcher researches, Coder codes) — see the `IDENTITY.md` files for the single-agent personas.
 
 | Agent | Planner Focus | Executor Tools | Reviewer Focus |
 |-------|--------------|----------------|----------------|
@@ -595,93 +622,150 @@ The tri-node architecture is identical, but each agent's `IDENTITY.md` customize
 
 ### Agent Sub-Nodes (per agent)
 
-Each agent container (`researcher`, `coder`) contains these sub-agents in its `.openclaw` state directory. Both agents now share the **same tri-node architecture and tool access** (Phase 1 brought Coder to parity with Researcher):
+Each agent container (`researcher`, `coder`) contains these sub-agents in its `.openclaw` state directory. In single-agent mode (#9), only `main` is **active**; the tri-node sub-agents are **commented out** in `openclaw.json` (JSON5) and preserved for the revival path (see §8). The table below reflects the **current** state:
 
 | Sub-Agent | Node Type | Tools | Function |
 |-----------|-----------|-------|----------|
-| `main` | Root | exec/web_fetch **denied** | Orchestrator-only router; receives A2A bridge payloads, delegates to sub-agents via `sessions_spawn` then `sessions_yield` |
-| `planner` | Sub-agent | `tools.profile: "full"` | Analyzes task, produces sequential blueprint (does not execute) |
-| `executor` | Sub-agent | `tools.profile: "full"` (no deny list) | Executes planner's blueprint using system tools (exec, curl, web_fetch, file I/O) |
-| `reviewer` | Sub-agent | `tools.profile: "full"` (no deny list) | Audits output, synthesizes final deliverable; on the Researcher, carries the (pending-enforcement) A2A code-delegation directive |
+| `main` | Root (active) | `tools.profile: "full"` (no deny list) | **Working agent** — receives A2A bridge payloads and does the task itself using full tool access (exec, web_fetch, read/write/edit). On the Researcher, curls the Coder's bridge directly when a task needs code (§8). |
+| `planner` | Sub-agent (PARKED) | `tools.profile: "full"` | Commented out in `openclaw.json`. Would analyze task, produce sequential blueprint (does not execute). |
+| `executor` | Sub-agent (PARKED) | `tools.profile: "full"` (no deny list) | Commented out in `openclaw.json`. Would execute planner's blueprint using system tools (exec, curl, web_fetch, file I/O). |
+| `reviewer` | Sub-agent (PARKED) | `tools.profile: "full"` (no deny list) | Commented out in `openclaw.json`. Would audit output, synthesize final deliverable; on the Researcher, carries the (parked) A2A code-delegation directive. |
 
-> **Coder parity (Phase 1):** Coder's `main` is now an orchestrator-only router matching Researcher's pattern (exec/web_fetch denied on `main`); all Coder sub-agents have `tools.profile: "full"`. The planner `id` is lowercase (`planner`) to match the `sessions_spawn` casing requirement.
+> **Coder parity (Phase 1):** Both agents share the same single-agent architecture: `main` is the working agent with full tool access; the tri-node sub-agents are commented out identically. The planner `id` is lowercase (`planner`) to match the `sessions_spawn` casing requirement (relevant when the tri-node is revived).
+
+### MCP Tool Servers (per agent)
+
+In addition to the built-in OpenClaw tools, each agent container runs **one MCP (Model Context Protocol) tool server** configured in its `openclaw.json` under a top-level `mcp.servers` block. MCP tools are exposed to the agent as plugin-owned tools under the `bundle-mcp` plugin id, with the naming convention `<serverName>__<toolName>` (e.g. `files__list_directory`, `memory__create_entities`). Because both agents use `tools.profile: "full"`, MCP tools are visible by default; `tools.deny: ["bundle-mcp"]` would disable them.
+
+| Agent | MCP Server | Config key | Root / Scope | Tools (filtered) |
+|-------|-----------|-----------|-------------|------------------|
+| **Coder** | `@modelcontextprotocol/server-filesystem` | `mcp.servers.files` | `/app/agents/coder/.openclaw/workspace` | `read_file`, `write_file`, `list_directory`, `search_files` (via `toolFilter.include`) |
+| **Researcher** | `@modelcontextprotocol/server-memory` | `mcp.servers.memory` | N/A (in-memory knowledge graph) | All tools (no `toolFilter`) — `create_entities`, `read_graph`, etc. |
+
+Both servers use the **stdio transport** (`{command, args, toolFilter}`). MCP servers spawn **lazily** — on the first agent session that invokes an MCP tool, not at gateway boot. See [§12 MCP Tool Servers](#12-mcp-tool-servers) for the full config shape, validation, and live-test evidence.
 
 ---
 
 ## 10. Operational Notes
 
-### Build & Start the Fleet
+### The tmux Bridge (required for agent-terminal access to the VM)
 
-From the macOS host (or inside the Fedora VM where Podman is running):
+> ⚠️ **Read this first.** The VS Code agent terminal cannot reach the VM's local subnet (see §11, "VS Code agent terminal cannot reach the VM's local subnet"). All commands below that target the VM or the containers must go through the **tmux bridge** — a tmux server started from an interactive Terminal.app shell, which runs in a working network context.
+
+The helper script **`vm-bridge.sh`** (in the workspace root) automates the bridge. It must be started from an **interactive Terminal.app shell** (not the VS Code terminal), because the tmux server inherits the network context of the shell that launches it.
 
 ```bash
-# Build images and start all services
-podman-compose -f podman-compose.yml up -d --build
+# From an interactive Terminal.app shell (NOT the VS Code terminal):
 
-# View running containers
-podman ps
+# Start the VM (if not already running)
+poc-openclaw-01   # alias: tart run poc-openclaw-01 --no-graphics --dir ~/GC/openclaw-a2a-bridge:tag=workspace &
 
-# View logs for a specific service
-podman logs -f researcher
+# Start the tmux bridge (idempotent — safe to re-run)
+./vm-bridge.sh start
 
-# View PM2 process status inside a container
-podman exec -it researcher pm2 status
+# Check bridge + VM + fleet status
+./vm-bridge.sh status
+
+# Run a command on the VM via the bridge (prints output when done)
+./vm-bridge.sh run 'sudo podman ps'
+
+# Stop the tmux bridge (does NOT stop the VM)
+./vm-bridge.sh stop
+```
+
+Once the bridge is up, the **VS Code agent terminal** can run commands on the VM by calling `vm-bridge.sh run "<cmd>"`. The script sends the command into the tmux pane via `tmux send-keys`, waits for completion, and prints the captured output. Commands execute as `admin` on the VM over SSH.
+
+> **Why the bridge is needed:** the agent terminal's `ssh admin@192.168.64.3` fails with `No route to host`, but the same command inside the tmux session (started from Terminal.app) succeeds. The tmux server bridges the two network contexts.
+
+> **Workspace on the VM:** the macOS workspace is mounted at `/mnt/workspace` on the VM. Scripts written on the macOS host are immediately executable on the VM at that path — no `scp` needed.
+
+### Build & Start the Fleet
+
+From the **agent terminal** (via the bridge), or from an interactive shell that can reach the VM:
+
+```bash
+# Via the bridge (agent terminal)
+./vm-bridge.sh run 'cd /mnt/workspace && sudo podman-compose -f podman-compose.yml up -d --build'
+
+# Or directly on the VM (interactive shell / SSH)
+cd /mnt/workspace && sudo podman-compose -f podman-compose.yml up -d --build
+```
+
+```bash
+# View running containers (via the bridge)
+./vm-bridge.sh run 'sudo podman ps'
+
+# View logs for a specific service (via the bridge)
+./vm-bridge.sh run 'sudo podman logs researcher | tail -40'
+
+# View PM2 process status inside a container (via the bridge)
+./vm-bridge.sh run 'sudo podman exec workspace_researcher_1 pm2 status'
 ```
 
 ### Stop the Fleet
 
 ```bash
-podman-compose -f podman-compose.yml down
+# Via the bridge (agent terminal)
+./vm-bridge.sh run 'cd /mnt/workspace && sudo podman-compose -f podman-compose.yml down'
+
+# Or directly on the VM
+cd /mnt/workspace && sudo podman-compose -f podman-compose.yml down
 ```
 
 ### Send a Test Payload
 
-```bash
-# Query the Researcher agent
-curl -s http://localhost:<PORT>/a2a/tasks \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "task",
-    "params": { "task": "Summarize the latest advances in quantum error correction" },
-    "id": "test-001"
-  }' | jq .
-
-# Query the Coder agent
-curl -s http://localhost:<PORT>/a2a/tasks \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "task",
-    "params": { "task": "Write a Python script that fetches and parses an RSS feed" },
-    "id": "test-002"
-  }' | jq .
-
-# Discover an agent's card
-curl -s http://localhost:<PORT>/.well-known/agent.json | jq .
-
-# List all registered agents in Apicurio
-curl -s http://localhost:8080/apis/registry/v2/groups/default/artifacts | jq .
-```
-
-> **Note on ports:** Both `researcher` and `coder` listen on port `3000` internally, but neither exposes a host port mapping in the current compose file. To send requests from the macOS host, either add `ports: ["3001:3000"]` / `ports: ["3002:3000"]` to the compose file, or use `podman exec` to curl from within the network:
+The agent containers don't expose host ports, so test payloads are sent from **inside the network** via `sudo podman exec`:
 
 ```bash
-# From inside the network
-podman exec -it researcher curl -s http://coder:3000/a2a/tasks \
+# Via the bridge (agent terminal) — query the Researcher from inside the Coder container
+./vm-bridge.sh run 'sudo podman exec workspace_coder_1 curl -s http://researcher:3000/a2a/tasks \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"task","params":{"task":"hello"},"id":"1"}' | jq .
+  -d "{\"jsonrpc\":\"2.0\",\"method\":\"task\",\"params\":{\"task\":\"hello\"},\"id\":\"1\"}"'
+
+# Discover an agent's card (from inside the network)
+./vm-bridge.sh run 'sudo podman exec workspace_researcher_1 curl -s http://coder:3000/.well-known/agent.json'
+
+# List all registered agents in Apicurio (from inside the network)
+./vm-bridge.sh run 'sudo podman exec workspace_researcher_1 curl -s http://apicurio:8080/apis/registry/v2/groups/default/artifacts'
 ```
+
+> **Note on ports:** Both `researcher` and `coder` listen on port `3000` internally, but neither exposes a host port mapping in the current compose file. To send requests from the macOS host directly, add `ports: ["3001:3000"]` / `ports: ["3002:3000"]` to the compose file.
 
 ### Inspect Agent State
 
 ```bash
-# List files in the researcher's OpenClaw state directory
+# On the macOS host (the .openclaw directories are in the workspace)
 ls -la agents/researcher/.openclaw/
-
-# List files in the coder's OpenClaw state directory
 ls -la agents/coder/.openclaw/
+
+# On the VM (via the bridge) — same files via the VirtioFS mount
+./vm-bridge.sh run 'ls -la /mnt/workspace/agents/researcher/.openclaw/'
 ```
+
+### Picking Up New MCP Config (restart the container, not just PM2)
+
+MCP server config lives in `openclaw.json` under `mcp.servers` (see [§12](#12-mcp-tool-servers)). The gateway reads this block at startup. To pick up a new or changed MCP server config, **restart the whole container** so PM2 (as PID 1) respawns both processes fresh:
+
+```bash
+# Via the bridge (agent terminal) — cleanest way to pick up new MCP config
+./vm-bridge.sh run 'sudo podman restart workspace_coder_1 workspace_researcher_1'
+```
+
+> ⚠️ **Do NOT use `pm2 restart openclaw-gateway` to pick up MCP config.** It can orphan the old gateway process on port 18789, causing an `EADDRINUSE` crash loop ("restart-loop breaker tripped: N unclean boot(s)"). The container restart avoids this entirely. See [§11](#11-known-constraints--workarounds) for the constraint row.
+
+### Validate an MCP Server (`openclaw mcp doctor --probe`)
+
+The `openclaw mcp doctor <name> --probe` CLI opens a live MCP connection and lists the server's tools — it validates that the server starts independently of the agent run:
+
+```bash
+# Via the bridge (agent terminal) — validate the coder's filesystem MCP
+./vm-bridge.sh run 'sudo podman exec workspace_coder_1 openclaw mcp doctor files --probe'
+
+# Validate the researcher's memory MCP
+./vm-bridge.sh run 'sudo podman exec workspace_researcher_1 openclaw mcp doctor memory --probe'
+```
+
+A result of `files: ok` / `memory: ok` means the server starts and its tools are reachable. The full MCP CLI surface: `openclaw mcp list/show/set/add/configure/tools/login/logout/reload/unset/doctor/probe`.
 
 ---
 
@@ -695,11 +779,112 @@ ls -la agents/coder/.openclaw/
 | **Apicurio in-memory storage** | Agent registrations lost on registry restart | 5-second delayed re-registration on bridge startup handles this automatically |
 | **No host port exposure** | Cannot `curl` agents directly from macOS host | Use `podman exec` to curl from within the network, or add port mappings to compose |
 | **Headless-only output** | Any conversational text corrupts JSON-RPC responses | Enforced via `USER.md` prompt; reviewer sub-agent strips non-JSON output |
-| **`openclaw agent` CLI is fire-and-forget** | The CLI returns `{ runId, acceptedAt }` at acceptance, NOT completion, so sub-agent responses (planner/executor/reviewer) are produced after the CLI exits | Bridge speaks the Gateway WS protocol (`connect` → `agent` → subscribe to `chat` events) instead of shelling out to the CLI; it waits for the main session's final synthesized `chat` event (arrives under a resumed runId after the spawn tree finishes). `agent.wait` is raced only for early error detection — it resolves at the first `sessions_yield`, NOT at spawn-tree completion |
+| **`openclaw agent` CLI is fire-and-forget** | The CLI returns `{ runId, acceptedAt }` at acceptance, NOT completion, so sub-agent responses (planner/executor/reviewer) are produced after the CLI exits | Bridge speaks the Gateway WS protocol (`connect` → `agent` → subscribe to `chat` events) instead of shelling out to the CLI; it waits for the main session's final synthesized `chat` event (arrives under a resumed runId after the spawn tree finishes). `agent.wait` is raced only for early error detection — it resolves at the first `sessions_yield`, NOT at spawn-tree completion. **In single-agent mode (#9)** there is no `sessions_yield`, so `agent.wait` resolves at run completion and the final `chat` event arrives on the same runId; the bridge still treats the `chat` event as the source of truth |
 | **`sessions.history` requires `operator.admin`** | The device is approved for `operator.write` only; `sessions.history` triggers `PAIRING_REQUIRED` | The bridge reads the result from the `chat` event stream instead of calling `sessions.history` |
 | **Sub-agent id casing** | `sessions_spawn` targets sub-agents by exact `id`; a mismatched case (e.g. `Executor` vs `executor`) silently fails to resolve | All sub-agent `id` values in `openclaw.json` are lowercase and match the IDs referenced in `IDENTITY.md`/`AGENTS.md` |
-| **Prompt-only A2A delegation does not fire** | The Researcher reviewer's "A2A Code Delegation" directive (POST code spec to Coder, don't write code yourself) is overridden by the model's task-completion instinct — the reviewer writes the code itself and Coder's bridge never receives a delegation. Proven across 4 end-to-end tests (2026-08-01) with both reviewer and executor as the delegation point. | **Pending structural enforcement.** The directive is in place as the intended design; making it actually fire is tracked in issues #6 (live with the limitation), #7 (plugin/extend OpenClaw to enforce deterministically), and #8 (fork/build a new runtime with first-class sub-agent delegation). The orchestrator guardrails (TRUNCATED-OUTPUT, STEP 5→6 ATOMIC, EXECUTOR ERROR) are in place and working. |
-| **Orchestrator early-termination (mitigated, not fully solved)** | The Researcher `main` orchestrator can end its turn mid-loop, capturing narration as the final answer and orphaning the reviewer. Triggered by truncated executor output, the step 5→6 gap, or executor errors. | Three guardrails in `main/IDENTITY.md` (TRUNCATED-OUTPUT RULE, STEP 5→6 ATOMIC, EXECUTOR ERROR / EMPTY-OUTPUT RULE) fix the known trigger paths. Test 5 showed a residual truncation-triggered early-termination still possible; full reliability likely requires the same structural enforcement as the delegation issue above. |
+| **Sub-agent + A2A cross-agent calls do not work in OpenClaw** | OpenClaw sub-agents cannot reliably drive cross-agent A2A calls, and the prompt-level delegation directive (Researcher's reviewer → Coder) is overridden by the model's task-completion instinct — the reviewer writes the code itself and Coder's bridge never receives a delegation. Proven across 4 end-to-end tests (2026-08-01) with both reviewer and executor as the delegation point. | **Single-agent mode (#9).** The tri-node design is parked pending an OpenClaw fix; artifacts are preserved via JSON5 comments in `openclaw.json`, `IDENTITY.tri-node.md`, and git tag `v0.1.0` (commit `5e428c0`). In single-agent mode, the Researcher's `main` curls the Coder's bridge directly when a task needs code — cross-agent A2A works end-to-end (live-tested 2026-08-11, #10). Making the tri-node fire deterministically is tracked in issues #6 (umbrella), #7 (plugin/extend OpenClaw), and #8 (fork/build a new runtime). |
+| **Orchestrator early-termination (moot in single-agent mode)** | The Researcher `main` orchestrator can end its turn mid-loop, capturing narration as the final answer and orphaning the reviewer. Triggered by truncated executor output, the step 5→6 gap, or executor errors. | **Moot in single-agent mode (#9):** `main` does the task itself — there is no spawn loop to terminate early, so this failure mode does not arise. The three guardrails (TRUNCATED-OUTPUT RULE, STEP 5→6 ATOMIC, EXECUTOR ERROR / EMPTY-OUTPUT RULE) are preserved in `IDENTITY.tri-node.md` and will apply again when the tri-node is revived. Full reliability at that point likely requires the same structural enforcement as the sub-agent/A2A issue above. |
+| **VS Code agent terminal cannot reach the VM's local subnet** | After a VS Code upgrade, the VS Code integrated terminal (and any process it spawns, including system binaries like `/usr/bin/ssh`) cannot reach hosts on the VM's local subnet (`192.168.64.0/24`) or the LAN (`192.168.100.0/24`). Symptom: `No route to host`. Internet and tailnet IPs still work. The block is at the system network-extension layer, applies to the whole VS Code process session regardless of binary, and is NOT caused by Tailscale, pf, the macOS Application Firewall, TCC Local Network privacy (VS Code is granted), the VS Code agent sandbox (it's off), or the Electron sandbox. An interactive Terminal.app shell on the same Mac CAN reach the VM. | **tmux bridge.** A tmux server started from an interactive Terminal.app shell runs in a working network context. The agent sends commands into the tmux session via `tmux send-keys` and reads captured output from `/tmp` files. The helper script `vm-bridge.sh` (see §10) automates this. The workspace is VirtioFS-mounted at `/mnt/workspace` on the VM, so scripts written on the macOS host are immediately executable on the VM without copying. |
+| **`pm2 restart openclaw-gateway` orphans the old gateway on port 18789** | `pm2 restart openclaw-gateway` can leave the OLD gateway process alive (holding port 18789) while spawning a new instance that can't bind, producing an `EADDRINUSE` crash loop ("restart-loop breaker tripped: N unclean boot(s) within 300000ms"). The container has no `lsof`/`ss`/`netstat` to find the orphan PID. This is a PM2/orphan-process issue, NOT an MCP config problem. | **Restart the whole container** to pick up new config (e.g. new MCP servers): `sudo podman restart <container>`. PM2 (as PID 1) respawns both processes fresh, clearing all orphans, lock files, and the restart counter. Do NOT use `pm2 restart openclaw-gateway` for config reloads, and do NOT chase orphan PIDs with `kill -9` (it causes more flapping). Manage processes through PM2 only (`pm2 start/stop/restart/status/logs`); for a full clean reset, use `podman restart`. |
+
+---
+
+## 12. MCP Tool Servers
+
+Each agent container runs **one MCP (Model Context Protocol) tool server** alongside the built-in OpenClaw tools. MCP is an open protocol that lets agents call external tool servers; OpenClaw exposes MCP tools to the agent as plugin-owned tools under the `bundle-mcp` plugin id.
+
+### Configuration Location
+
+MCP servers are configured in the agent's `openclaw.json` (JSON5) under a **top-level `mcp.servers` block** — NOT under `plugins` (which stays `{}`). Each key under `mcp.servers` is the server name (used in the tool namespace).
+
+### Config Shape (stdio transport)
+
+```json5
+// agents/coder/.openclaw/openclaw.json (excerpt)
+"mcp": {
+  "servers": {
+    "files": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/app/agents/coder/.openclaw/workspace"],
+      "toolFilter": {
+        "include": ["read_file", "write_file", "list_directory", "search_files"]
+      }
+    }
+  }
+}
+```
+
+```json5
+// agents/researcher/.openclaw/openclaw.json (excerpt)
+"mcp": {
+  "servers": {
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+      // no toolFilter = all tools exposed
+    }
+  }
+}
+```
+
+| Field | Purpose |
+|-------|---------|
+| `command` + `args` | The stdio command to launch the MCP server (here `npx -y @modelcontextprotocol/server-*`). |
+| `toolFilter.include` / `toolFilter.exclude` | Restrict which of the server's tools are exposed to the agent. Omitting `toolFilter` exposes all tools. |
+| `env`, `cwd` | Optional environment variables and working directory for the server process. |
+| `mcp.sessionIdleTtlMs` | Optional top-level field (default `600000`ms) — how long an idle MCP session is kept alive before teardown. |
+
+> **HTTP transport** (not used in this PoC, but supported): `{ url, transport: "streamable-http"|"sse", headers, auth: "oauth", timeout, connectTimeout, sslVerify, clientCert, clientKey, supportsParallelToolCalls, toolFilter }`.
+
+### How MCP Tools Appear to the Agent
+
+- MCP tools are exposed as **plugin-owned tools under the `bundle-mcp` plugin id**.
+- Tool naming convention: `<serverName>__<toolName>` — e.g. `files__list_directory`, `memory__create_entities`, `memory__read_graph`.
+- Visibility follows the tool profile: MCP tools appear in the `coding` and `messaging` profiles. Both agents use `tools.profile: "full"`, so MCP tools are **visible by default**. To disable: `tools.deny: ["bundle-mcp"]`. In sandbox mode: add `bundle-mcp` to `alsoAllow`.
+- MCP servers spawn **lazily** — on the first agent session that invokes an MCP tool, not at gateway boot. The gateway log line `bundle-mcp:<name>: <ServerName> running on stdio` marks the spawn.
+
+### Deployed Servers
+
+| Agent | Server name | Package | Root / Scope | Exposed tools |
+|-------|-----------|---------|-------------|---------------|
+| **Coder** | `files` | `@modelcontextprotocol/server-filesystem` | `/app/agents/coder/.openclaw/workspace` | `read_file`, `write_file`, `list_directory`, `search_files` (filtered) |
+| **Researcher** | `memory` | `@modelcontextprotocol/server-memory` | in-memory knowledge graph | `create_entities`, `create_relations`, `add_observations`, `read_graph`, etc. (all) |
+
+### Validation + Live-Test Evidence (2026-08-11, #12)
+
+**Config validation** — `openclaw mcp doctor <name> --probe` opens a live MCP connection and lists tools:
+
+```
+$ openclaw mcp doctor files --probe   # in the coder container
+files: ok
+$ openclaw mcp doctor memory --probe  # in the researcher container
+memory: ok
+```
+
+**Live tool invocation** — sending a task that asks the agent to use an MCP tool produces these gateway log lines (proof the MCP server spawned and the tool was called):
+
+```
+# Coder (filesystem MCP)
+bundle-mcp:files: Secure MCP Filesystem Server running on stdio
+bundle-mcp:files: Client does not support MCP Roots, using allowed directories set from server args: [ '/app/agents/coder/.openclaw/workspace' ]
+[agent/embedded] embedded run tool start: tool=files__list_directory toolCallId=call_47771e4f...
+[agent/embedded] embedded run tool end:   tool=files__list_directory toolCallId=call_47771e4f...
+
+# Researcher (memory MCP)
+bundle-mcp:memory: Knowledge Graph MCP Server running on stdio
+[agent/embedded] embedded run tool start: tool=memory__create_entities toolCallId=call_21b96422...
+[agent/embedded] embedded run tool end:   tool=memory__create_entities toolCallId=call_21b96422...
+[agent/embedded] embedded run tool start: tool=memory__read_graph     toolCallId=call_da8d19a0...
+[agent/embedded] embedded run tool end:   tool=memory__read_graph     toolCallId=call_da8d19a0...
+```
+
+Both runs returned `status: "success"`, `runStatus: "ok"` in the JSON-RPC response. The Coder's `list_directory` returned the real workspace contents; the Researcher's `create_entities` + `read_graph` returned the created entity and the knowledge graph. (The Coder's output carried markdown fences — the known output-hygiene issue from #10, not an MCP issue.)
+
+### Operational Notes
+
+- **Picking up new MCP config:** restart the whole container (`sudo podman restart <container>`) so PM2 respawns both processes fresh. Do NOT use `pm2 restart openclaw-gateway` — it can orphan the old gateway on port 18789 (see [§11](#11-known-constraints--workarounds)).
+- **MCP CLI surface:** `openclaw mcp list/show/set/add/configure/tools/login/logout/reload/unset/doctor/probe`. Use `set <name> <json>` to write a server config; `doctor <name> --probe` to validate it starts.
+- **Adding a new MCP server:** add an entry under `mcp.servers` in the agent's `openclaw.json`, then restart the container. The server will spawn lazily on first tool invocation.
 
 ---
 

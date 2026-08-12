@@ -14,16 +14,27 @@ const HOST_IP = process.env.HOST_IP || 'localhost';
 
 // Gateway WS connection (the OpenClaw gateway runs in-container via PM2).
 // The CLI `openclaw agent` is fire-and-forget (returns {runId, acceptedAt} at
-// acceptance, NOT at completion), so it cannot observe sub-agent delegation.
+// acceptance, NOT at completion), so it cannot observe run completion.
 // We instead speak the documented Gateway WS protocol: `agent` accepts a run,
-// `agent.wait` blocks until lifecycle end/error, then `sessions.history` reads
-// the final assistant message produced by the planner/executor/reviewer loop.
+// we subscribe to `chat` events for the main session and wait for the final
+// synthesized assistant message, racing `agent.wait` for early error detection.
+//
+// Mode note (issue #9, tag v0.1.0): agents currently run in SINGLE-AGENT mode —
+// `main` does the work itself (no sessions_spawn/sessions_yield), so
+// `agent.wait` resolves at actual completion and the final `chat` event arrives
+// on the main session. The tri-node (planner→executor→reviewer) design is
+// PARKED (commented out in openclaw.json as JSON5); if revived, `main` would
+// sessions_yield and `agent.wait` would resolve at the first yield (NOT at
+// spawn-tree completion), so the chat-event wait below is the real completion
+// signal in both modes. See AGENTS.md §5/§8 and IDENTITY.tri-node.md.
 const GATEWAY_WS_URL = process.env.GATEWAY_WS_URL || 'ws://127.0.0.1:18789';
 const GATEWAY_AUTH_TOKEN = process.env.GATEWAY_AUTH_TOKEN || '';
 const AGENT_ID = process.env.OPENCLAW_AGENT_ID || 'main';
 const SESSION_KEY = process.env.OPENCLAW_SESSION_KEY || 'main';
 // agent.wait is wait-only and defaults to 30s; the underlying run can take
-// minutes when sub-agents are involved. Use a generous default.
+// minutes. Sized generously for the parked tri-node spawn-tree mode; single-
+// agent runs are shorter but long research + A2A delegation can still take a
+// while, so leave the generous default. See issue #10.
 const RUN_TIMEOUT_MS = parseInt(process.env.RUN_TIMEOUT_MS || '600000', 10);
 // OpenClaw state dir (same env the gateway reads). Used to locate the device
 // identity keypair so the bridge can sign the connect.challenge nonce and
@@ -177,12 +188,14 @@ function connectGateway() {
         // expose waitForFinalAssistantText which waits for the event.
         const finalWaiters = new Map();
         // Track the most recent final assistant text from ANY session as a
-        // fallback. The main agent sometimes ends its turn without producing a
-        // final message (e.g. it stops after the planner instead of running the
-        // full planner→executor→reviewer loop). In that case the main session's
-        // final chat event has no message, so we fall back to the last sub-agent's
-        // final text (usually the reviewer's, or the planner's if the loop
-        // stopped early) so the A2A caller still gets a useful payload.
+        // fallback. In single-agent mode (current, issue #9) the main session
+        // produces the final answer directly. In the parked tri-node mode the
+        // main agent sometimes ended its turn without producing a final message
+        // (e.g. it stopped after the planner instead of running the full
+        // planner→executor→reviewer loop); in that case the main session's
+        // final chat event had no message, so we fell back to the last
+        // sub-agent's final text (usually the reviewer's). The fallback is
+        // kept so revival of the tri-node mode needs no bridge changes.
         let lastFinalText = null;
         // Accumulate assistant delta text per sessionKey. The gateway sometimes
         // emits the chat terminal (state="final") for the main session with NO
@@ -190,7 +203,8 @@ function connectGateway() {
         // synthesized answer — the text is delivered via delta events under a
         // different runId (e.g. a resumed/announce run) and the terminal for the
         // original runId has an empty buffer. By accumulating deltas per
-        // sessionKey we can reconstruct the final answer as a fallback.
+        // sessionKey we can reconstruct the final answer as a fallback. This
+        // applies in both single-agent and (parked) tri-node modes.
         const deltaTextBySession = new Map();
 
         const sendConnect = (nonce) => {
@@ -351,31 +365,36 @@ app.get('/.well-known/agent.json', (req, res) => {
 /**
  * Run a task against the local OpenClaw gateway and wait for completion.
  *
- * Lifecycle (per docs/concepts/concepts/agent-loop.md and session-tool.md):
+ * Current mode (issue #9, tag v0.1.0): SINGLE-AGENT. `main` does the work
+ * itself — no `sessions_spawn`/`sessions_yield`, no sub-agent tree. The
+ * lifecycle is therefore simple:
  *   1. `agent`      -> { runId, acceptedAt }  (acceptance, NOT completion)
- *   2. The main agent delegates to planner/executor/reviewer via
- *      `sessions_spawn` (non-blocking) + `sessions_yield`. `sessions_yield`
- *      ENDS the current turn, which ends the lifecycle for the original
- *      `runId`. The sub-agents keep running in the background; when they
- *      complete, a NEW turn (new runId) starts on the main session to process
- *      the completion event and synthesize the final answer.
- *   3. `agent.wait` on the original runId therefore resolves at the FIRST
- *      yield — NOT when the whole spawn tree finishes. We use it only to
- *      detect early lifecycle errors; we do NOT treat its resolution as
- *      completion.
- *   4. The final synthesized answer arrives as a `chat` event with
- *      state="final" and message.role="assistant" on the main session, under
- *      a LATER runId. We wait for that event (bounded by RUN_TIMEOUT_MS).
- *      We cannot use sessions.history because it requires operator.admin
- *      scope, which the paired device isn't approved for (requesting it
- *      triggers a PAIRING_REQUIRED scope-upgrade that needs interactive
- *      approval).
+ *   2. `main` runs to completion and emits its final assistant message.
+ *   3. `agent.wait` on the runId resolves at actual completion (no yield
+ *      happens mid-run in single-agent mode).
+ *   4. The final answer arrives as a `chat` event with state="final" and
+ *      message.role="assistant" on the main session. We wait for that event
+ *      (bounded by RUN_TIMEOUT_MS); `agent.wait` is raced in parallel only to
+ *      surface early lifecycle errors.
+ *
+ * Parked mode (tri-node, see IDENTITY.tri-node.md + openclaw.json comments):
+ *   `main` would delegate to planner/executor/reviewer via `sessions_spawn`
+ *   (non-blocking) + `sessions_yield`. `sessions_yield` ENDS the current turn,
+ *   so `agent.wait` on the original runId resolves at the FIRST yield — NOT
+ *   when the spawn tree finishes. The final synthesized answer arrives later
+ *   as a `chat` event on the main session under a resumed runId. The chat-
+ *   event wait below is the real completion signal in BOTH modes, so reviving
+ *   the tri-node design needs no bridge logic change.
+ *
+ * We cannot use sessions.history to read the result: it requires operator.admin
+ * scope, which the paired device isn't approved for (requesting it triggers a
+ * PAIRING_REQUIRED scope-upgrade that needs interactive approval).
  *
  * Fallbacks if the main session's final chat event has no message (the
  * gateway sometimes suppresses the message field when the text was streamed
- * under a different runId, or the main agent ends without synthesizing):
+ * under a different runId, or the agent ends without synthesizing):
  *   a. accumulated assistant delta text for the main session
- *   b. the last final assistant text from any sub-agent session
+ *   b. the last final assistant text from any sub-agent session (tri-node only)
  */
 async function runTask(taskInstruction) {
     const gw = await connectGateway();
@@ -394,20 +413,24 @@ async function runTask(taskInstruction) {
         // the agent call to look up the final chat event for THIS session.
         const fullSessionKey = accepted?.sessionKey || `agent:${AGENT_ID}:${SESSION_KEY}`;
 
-        // agent.wait resolves at the FIRST sessions_yield (lifecycle end of the
-        // original runId), NOT when the spawn tree finishes. Use it only to
-        // surface early lifecycle errors; race it against waiting for the final
-        // synthesized assistant text on the main session (which arrives later,
-        // under a resumed runId, after all sub-agents complete).
+        // agent.wait resolves at actual completion in single-agent mode (no
+        // sessions_yield happens mid-run). In the parked tri-node mode it
+        // would resolve at the FIRST sessions_yield (lifecycle end of the
+        // original runId), NOT when the spawn tree finishes. In both modes we
+        // use it only to surface early lifecycle errors; we race it against
+        // waiting for the final synthesized assistant text on the main session
+        // (the real completion signal, which in tri-node mode arrives later
+        // under a resumed runId after all sub-agents complete).
         const waitPromise = gw.request('agent.wait', {
             runId,
             timeoutMs: RUN_TIMEOUT_MS,
         }).catch((err) => ({ __error: err.message }));
 
         // Wait for the final synthesized assistant text on the main session.
-        // This is the real completion signal — it arrives after the whole
-        // planner→executor→reviewer loop finishes and the main agent resumes to
-        // emit its final answer. Bound by RUN_TIMEOUT_MS.
+        // This is the real completion signal — in single-agent mode it arrives
+        // when `main` finishes; in the parked tri-node mode it arrives after
+        // the whole planner→executor→reviewer loop finishes and the main agent
+        // resumes to emit its final answer. Bound by RUN_TIMEOUT_MS.
         let output = await gw.waitForFinalAssistantText(fullSessionKey, RUN_TIMEOUT_MS);
 
         // Inspect agent.wait result for early errors (don't let it block — by
@@ -441,7 +464,7 @@ app.post('/a2a/tasks', async (req, res) => {
         const payload = req.body;
         const taskInstruction = payload.params?.task || "status";
 
-        console.log(`[${ROLE}] Received A2A payload. Routing to OpenClaw Gateway (agent.wait lifecycle)...`);
+        console.log(`[${ROLE}] Received A2A payload. Routing to OpenClaw Gateway (single-agent mode, waiting for final chat event)...`);
 
         const result = await runTask(taskInstruction);
 
