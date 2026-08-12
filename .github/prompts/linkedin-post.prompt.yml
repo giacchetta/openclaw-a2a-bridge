@@ -48,13 +48,17 @@ messages:
          documented.
       2. Read `commits` and `diffstat` to ground the post in concrete artifacts
          (files, protocols, tool names).
-      3. Synthesize into 2–4 narrative sections with emoji + bold headings,
-         matching the voice in the system prompt. Do NOT dump the commit list.
+      3. Synthesize into 3–4 narrative sections, each an emoji + bold heading
+         followed by 2–4 emoji-led bullets, matching the voice in the system
+         prompt. Do NOT dump the commit list.
       4. Emit frontmatter with `slug`, `title`, `description` (one quoted
          sentence, 120–160 chars, SEO meta description — not LinkedIn copy),
          `date` (={{merge_date}}), `authors: [giacchetta]`, `tags` (1–3 from
-         the allowed vocabulary), `pr: {{pr_number}}`.
-      5. 150–250 words in the body. One closing one-liner.
+         `ai-engineer, ai-agent, ai-a2a, ai-mcp, ai-orcherstrator, ai-seo,
+         ai-video` — no others), `pr: {{pr_number}}`.
+      5. Open the body with a standalone hook line under 140 characters (the
+         LinkedIn mobile fold), then a short lead, then 2,000–3,000
+         characters of body total. One closing one-liner, unlabelled.
       6. Output ONLY the Markdown file. No commentary.
 
 model: auto
