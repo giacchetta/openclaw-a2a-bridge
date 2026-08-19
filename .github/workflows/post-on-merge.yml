@@ -1,15 +1,12 @@
 name: Post on Merge
 
-# Generate a LinkedIn-style post from a merged PR and open a pull request
-# against the personal site (giacchetta/giacchetta.github.io) adding the post
-# under src/content/blog/<slug>.md (an Astro content collection). The repo's
-# CODEOWNER reviews and merges the PR; the repo's static.yaml workflow
-# rebuilds and deploys on push to main.
+# Thin caller for the reusable post-on-merge pipeline hosted in
+# giacchetta/giacchetta.github.io. One merged PR == one post: the pipeline
+# gathers this PR + its closing issues, generates a LinkedIn-style post, and
+# opens a PR on the site repo under src/content/blog/<slug>.md.
 #
-# One merged PR == one post. The PR's closing issues (parent + sub-issues)
-# are gathered as narrative feed alongside the PR title/body/commits/diffstat.
-#
-# See .github/prompts/README.md for the prompt contract.
+# This repo owns the trigger and the merged==true gate only. All scripts and
+# prompts live upstream — see giacchetta.github.io/.github/post-on-merge.md.
 
 on:
   pull_request:
@@ -23,133 +20,19 @@ on:
         required: true
         type: string
 
-# Default token is enough for reading this repo; cross-repo push uses POSTS_PAT.
+# Reading this repo's PR/issues is all GITHUB_TOKEN needs to do; the
+# cross-repo push uses posts_pat.
 permissions:
   contents: read
   pull-requests: read
 
-concurrency:
-  group: post-on-merge-${{ github.event.pull_request.number || inputs.pr_number }}
-  cancel-in-progress: false
-
 jobs:
-  generate:
-    # Only run on PRs merged into the default branch (or manual dispatch).
+  post:
+    # Only merged PRs (or a manual dispatch) produce a post.
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout this repo
-        uses: actions/checkout@v6
-
-      # Fail fast, before spending any AI-inference tokens, if the sanitizer
-      # that guards the post body against bare `<word>` HTML-like tokens is
-      # itself broken. See sanitize-post.py's header for the incident this
-      # closes (PR #13: an un-escaped `<server>__<tool>` token silently
-      # emptied the built page's extracted content).
-      - name: Self-test post sanitizer
-        run: python3 .github/scripts/sanitize-post.py --self-test
-
-      - name: Resolve PR number
-        id: pr
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "number=${{ inputs.pr_number }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Install gh CLI is preinstalled on ubuntu-latest
-        run: gh --version
-
-      - name: Gather PR + linked issues feed
-        id: gather
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
-        run: |
-          set -euo pipefail
-          bash .github/scripts/gather-feed.sh > feed.json
-          # Show a compact summary in the workflow log for debugging.
-          jq '{pr_number, pr_title, repo, merge_date, issue_count: (.issues|length), commit_count: (.commits|length), files_changed: (.files_changed|length)}' feed.json
-          # Expose the feed as a step output for the inference step. Use the
-          # heredoc form so multi-line JSON survives intact into the output.
-          {
-            echo "feed<<EOF"
-            cat feed.json
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Install Copilot CLI
-        run: npm install -g @github/copilot
-
-      - name: Run AI inference
-        id: ai
-        uses: actions/ai-inference@v3
-        with:
-          prompt-file: .github/prompts/linkedin-post.prompt.yml
-          system-prompt-file: .github/prompts/linkedin-post.system.md
-          model: auto
-          # Only YAML-safe scalars go in `input:`. The PR title/body and JSON
-          # arrays contain colons, `#`, and other chars that break YAML parsing
-          # (the v3 failure on PR #14's merge: "bad indentation of a mapping
-          # entry" at `pr_title: ci(post): ...`). The full feed is injected as a
-          # single {{feed}} file variable via `file_input:` instead.
-          input: |
-            repo: "${{ github.repository }}"
-            pr_number: ${{ fromJSON(steps.gather.outputs.feed).pr_number }}
-            merge_date: "${{ fromJSON(steps.gather.outputs.feed).merge_date }}"
-          file_input: |
-            feed: feed.json
-        env:
-          COPILOT_GITHUB_TOKEN: ${{ secrets.GC_COPILOT_TOKEN }}
-
-      # Clean the AI response (strip CRLF + leading/trailing code fences) and
-      # derive the post's path/filename from a single grepped `slug:` line in
-      # the model's frontmatter, falling back to a slugified PR_TITLE (from
-      # gather) when that line is missing or invalid — NOT by parsing the
-      # model's frontmatter as YAML. The model occasionally injects code
-      # fences inside the frontmatter that crash yaml.safe_load, so we
-      # stopped doing a full parse; the one `slug:` line is read with a
-      # bounded, validated text scan instead. The frontmatter is otherwise
-      # left untouched; the CODEOWNER reviews the PR before merge.
-      - name: Prepare generated post
-        id: post
-        env:
-          RESPONSE_FILE: ${{ steps.ai.outputs.response-file }}
-          PR_TITLE: ${{ fromJSON(steps.gather.outputs.feed).pr_title }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
-        run: |
-          set -euo pipefail
-          bash .github/scripts/prepare-post.sh
-
-      # Push the post to the personal site via a short-lived branch + pull
-      # request (NOT a direct push to main). The repo's CODEOWNER reviews and
-      # merges the PR; the repo's static.yaml workflow rebuilds and deploys on
-      # push to main. Requires the GC_TOKEN secret (PAT with contents:write +
-      # pull-requests:write on giacchetta/giacchetta.github.io).
-      - name: Push post to personal site
-        env:
-          POSTS_PAT: ${{ secrets.GC_TOKEN }}
-          POST_PATH: ${{ steps.post.outputs.path }}
-          POST_FILENAME: ${{ steps.post.outputs.filename }}
-          POST_TITLE: ${{ steps.post.outputs.title }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
-          CLEANED_FILE: ${{ steps.post.outputs.cleaned_file }}
-          SOURCE_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          bash .github/scripts/push-post.sh
-
-      - name: Print generated post to log
-        if: always()
-        env:
-          RESPONSE_FILE: ${{ steps.ai.outputs.response-file }}
-        run: |
-          echo "::group::Generated post (raw model response)"
-          if [ -n "$RESPONSE_FILE" ] && [ -f "$RESPONSE_FILE" ]; then
-            cat "$RESPONSE_FILE"
-          else
-            echo "(no response file — ai-inference step did not produce output)"
-          fi
-          echo "::endgroup::"
+    uses: giacchetta/giacchetta.github.io/.github/workflows/post-on-merge.yml@main
+    with:
+      pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
+    secrets:
+      copilot_token: ${{ secrets.GC_COPILOT_TOKEN }}
+      posts_pat: ${{ secrets.GC_TOKEN }}
